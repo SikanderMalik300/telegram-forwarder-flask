@@ -3,7 +3,7 @@
 {% block content %}
 <div class="mb-8">
     <h1 class="text-3xl font-bold text-white mb-2">Chat Browser</h1>
-    <p class="text-purple-300">Browse and download complete chat histories</p>
+    <p class="text-purple-300">Browse your Telegram chats and channels</p>
 </div>
 
 <!-- Account Selection -->
@@ -71,20 +71,35 @@
     </div>
 </div>
 
-<!-- Rest of the chats interface remains the same -->
-<!-- Chats Grid -->
-<div id="chats-section" class="mb-8 hidden">
-    <h2 class="text-xl font-semibold text-white mb-4">Available Chats</h2>
-    <div id="chats-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <!-- Chats will be loaded here -->
-    </div>
-</div>
-
-<!-- Downloaded Histories -->
-<div id="histories-section" class="hidden">
-    <h2 class="text-xl font-semibold text-white mb-4">Downloaded Histories</h2>
-    <div id="histories-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <!-- Histories will be loaded here -->
+<!-- Chats Table -->
+<div id="chats-section" class="hidden">
+    <div class="glass rounded-lg">
+        <div class="p-6 border-b border-purple-700/30">
+            <div class="flex justify-between items-center">
+                <h3 class="text-white font-semibold flex items-center">
+                    <i class="fas fa-comments mr-2"></i>
+                    Available Chats
+                </h3>
+                <div class="text-sm text-purple-300">
+                    Total: <span id="chat-count">0</span> chats
+                </div>
+            </div>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="w-full">
+                <thead>
+                    <tr class="border-b border-purple-700/30">
+                        <th class="text-left py-3 px-6 text-purple-200 font-medium">Type</th>
+                        <th class="text-left py-3 px-6 text-purple-200 font-medium">Name</th>
+                        <th class="text-left py-3 px-6 text-purple-200 font-medium">Chat ID</th>
+                        <th class="text-left py-3 px-6 text-purple-200 font-medium">Members</th>
+                    </tr>
+                </thead>
+                <tbody id="chats-table-body">
+                    <!-- Chats will be loaded here -->
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
@@ -92,53 +107,7 @@
 <div id="no-chats-message" class="glass rounded-lg text-center py-12 hidden">
     <i class="fas fa-comments text-6xl text-purple-400 mb-4"></i>
     <h3 class="text-xl font-semibold text-white mb-2">No chats loaded</h3>
-    <p class="text-purple-300 mb-6">Click "Fetch Chats" to load your Telegram conversations</p>
-</div>
-
-<!-- Download Modal -->
-<div id="download-modal" class="fixed inset-0 z-50 hidden">
-    <div class="fixed inset-0 bg-black/50"></div>
-    <div class="fixed inset-0 flex items-center justify-center p-4">
-        <div class="glass rounded-lg w-full max-w-md p-6">
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="text-xl font-semibold text-white">Download Chat History</h3>
-                <button id="close-download-modal" class="text-purple-300 hover:text-white">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-            
-            <div class="space-y-4">
-                <div>
-                    <p class="text-purple-200 text-sm mb-2">
-                        Chat: <strong id="selected-chat-title"></strong>
-                    </p>
-                    <p class="text-purple-300 text-xs">
-                        This will download the complete chat history like your Python script.
-                    </p>
-                </div>
-                
-                <div>
-                    <label for="message-limit" class="block text-purple-200 text-sm font-medium mb-2">
-                        Number of Messages to Download
-                    </label>
-                    <input type="number" id="message-limit" value="1000" min="1" max="10000"
-                           class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white placeholder-purple-400 focus:outline-none focus:ring-2 focus:ring-purple-500">
-                    <p class="text-xs text-purple-400 mt-1">
-                        Default: 1000 messages. Maximum: 10,000 messages.
-                    </p>
-                </div>
-                
-                <div class="flex justify-end space-x-2 pt-4">
-                    <button id="cancel-download" class="px-4 py-2 text-purple-300 hover:text-white transition-colors">
-                        Cancel
-                    </button>
-                    <button id="confirm-download" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
-                        <i class="fas fa-download mr-2"></i>Download
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
+    <p class="text-purple-300 mb-6">Select an account and click "Fetch Chats" to load your Telegram conversations</p>
 </div>
 {% endblock %}
 
@@ -146,24 +115,17 @@
 <script>
     let accounts = [];
     let chats = [];
-    let histories = [];
-    let selectedChat = null;
-    let downloadingChats = new Set();
 
     // DOM elements
     const accountSelect = document.getElementById('account-select');
     const fetchChatsBtn = document.getElementById('fetch-chats-btn');
     const fetchIcon = document.getElementById('fetch-icon');
     const chatsSection = document.getElementById('chats-section');
-    const chatsContainer = document.getElementById('chats-container');
-    const historiesSection = document.getElementById('histories-section');
-    const historiesContainer = document.getElementById('histories-container');
+    const chatsTableBody = document.getElementById('chats-table-body');
     const noChatsMessage = document.getElementById('no-chats-message');
-    const downloadModal = document.getElementById('download-modal');
     const authRequiredModal = document.getElementById('auth-required-modal');
-    const selectedChatTitle = document.getElementById('selected-chat-title');
-    const messageLimitInput = document.getElementById('message-limit');
     const authWarning = document.getElementById('auth-warning');
+    const chatCount = document.getElementById('chat-count');
 
     // Load accounts
     async function loadAccounts() {
@@ -191,6 +153,7 @@
             }
         } catch (error) {
             console.error('Error loading accounts:', error);
+            showToast('Failed to load accounts', 'error');
         }
     }
 
@@ -205,16 +168,6 @@
             authWarning.classList.remove('hidden');
         } else {
             authWarning.classList.add('hidden');
-        }
-    }
-
-    // Load chat histories
-    async function loadChatHistories() {
-        try {
-            histories = await apiCall('/api/chat_histories');
-            renderHistories();
-        } catch (error) {
-            console.error('Error loading chat histories:', error);
         }
     }
 
@@ -260,7 +213,7 @@
         }
     }
 
-    // Render chats
+    // Render chats in table format
     function renderChats() {
         if (chats.length === 0) {
             chatsSection.classList.add('hidden');
@@ -268,78 +221,33 @@
         } else {
             chatsSection.classList.remove('hidden');
             noChatsMessage.classList.add('hidden');
+            chatCount.textContent = chats.length;
 
-            chatsContainer.innerHTML = chats.map(chat => `
-                <div class="glass rounded-lg hover:bg-purple-900/40 transition-colors">
-                    <div class="p-4">
-                        <div class="mb-3">
-                            <h4 class="text-white font-medium text-sm flex items-center">
-                                <i class="fas ${getChatIcon(chat.type)} mr-2"></i>
-                                <span class="truncate">${chat.title}</span>
-                            </h4>
+            chatsTableBody.innerHTML = chats.map(chat => `
+                <tr class="border-b border-purple-700/10 hover:bg-purple-900/20 transition-colors">
+                    <td class="py-4 px-6">
+                        <div class="flex items-center">
+                            <i class="fas ${getChatIcon(chat.type)} mr-2"></i>
+                            <span class="text-white font-medium capitalize">${chat.type}</span>
                         </div>
-                        
-                        <div class="space-y-1 mb-3">
-                            <div class="text-xs text-purple-300">
-                                Type: ${chat.type.charAt(0).toUpperCase() + chat.type.slice(1)}
-                            </div>
-                            ${chat.participant_count ? `
-                                <div class="text-xs text-purple-300">
-                                    Members: ${chat.participant_count.toLocaleString()}
-                                </div>
-                            ` : ''}
-                            <div class="text-xs text-purple-400">
-                                ID: ${chat.id}
-                            </div>
+                    </td>
+                    <td class="py-4 px-6">
+                        <div class="text-white font-medium">${escapeHtml(chat.title)}</div>
+                    </td>
+                    <td class="py-4 px-6">
+                        <div class="text-purple-300 font-mono text-sm">${chat.id}</div>
+                    </td>
+                    <td class="py-4 px-6">
+                        <div class="text-purple-200">
+                            ${chat.participant_count ? chat.participant_count.toLocaleString() : 'N/A'}
                         </div>
-                        
-                        <button onclick="openDownloadModal(${JSON.stringify(chat).replace(/"/g, '&quot;')})" 
-                                ${downloadingChats.has(chat.id) ? 'disabled' : ''}
-                                class="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 text-white px-3 py-2 rounded text-sm transition-colors">
-                            ${downloadingChats.has(chat.id) ? 
-                                '<i class="fas fa-spinner fa-spin mr-2"></i>' : 
-                                '<i class="fas fa-download mr-2"></i>'
-                            }
-                            Download Complete History
-                        </button>
-                    </div>
-                </div>
+                    </td>
+                </tr>
             `).join('');
         }
     }
 
-    // Render histories
-    function renderHistories() {
-        if (histories.length === 0) {
-            historiesSection.classList.add('hidden');
-        } else {
-            historiesSection.classList.remove('hidden');
-            historiesContainer.innerHTML = histories.map(history => `
-                <div class="glass rounded-lg">
-                    <div class="p-4">
-                        <h4 class="text-white font-medium text-sm flex items-center mb-3">
-                            <i class="fas fa-comments text-purple-400 mr-2"></i>
-                            <span class="truncate">${history.chat_title}</span>
-                        </h4>
-                        
-                        <div class="space-y-1">
-                            <div class="text-xs text-purple-300">
-                                Messages: ${history.message_count ? history.message_count.toLocaleString() : 'Unknown'}
-                            </div>
-                            <div class="text-xs text-purple-400">
-                                Downloaded: ${new Date(history.created_at).toLocaleDateString()}
-                            </div>
-                            <div class="text-xs text-purple-400">
-                                Chat ID: ${history.chat_id}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `).join('');
-        }
-    }
-
-    // Get chat icon
+    // Get chat icon based on type
     function getChatIcon(type) {
         switch (type) {
             case 'private': return 'fa-user text-blue-400';
@@ -349,17 +257,11 @@
         }
     }
 
-    // Open download modal
-    function openDownloadModal(chat) {
-        selectedChat = chat;
-        selectedChatTitle.textContent = chat.title;
-        downloadModal.classList.remove('hidden');
-    }
-
-    // Close download modal
-    function closeDownloadModal() {
-        downloadModal.classList.add('hidden');
-        selectedChat = null;
+    // Escape HTML to prevent XSS
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
     }
 
     // Close auth required modal
@@ -367,77 +269,14 @@
         authRequiredModal.classList.add('hidden');
     }
 
-    // Download chat history
-    async function downloadChatHistory() {
-        if (!selectedChat || !accountSelect.value) return;
-
-        const accountId = parseInt(accountSelect.value);
-        const limit = parseInt(messageLimitInput.value) || 1000;
-
-        downloadingChats.add(selectedChat.id);
-        closeDownloadModal();
-        renderChats(); // Re-render to show loading state
-
-        showToast(`Starting download of ${limit} messages from ${selectedChat.title}...`);
-
-        try {
-            const response = await fetch('/api/chats/download', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    account_id: accountId,
-                    chat_id: selectedChat.id,
-                    chat_title: selectedChat.title,
-                    limit: limit
-                })
-            });
-
-            if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.error || 'Failed to download chat history');
-            }
-
-            // Download the file
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = url;
-            a.download = `${selectedChat.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_history.txt`;
-            document.body.appendChild(a);
-            a.click();
-            window.URL.revokeObjectURL(url);
-            document.body.removeChild(a);
-
-            showToast(`Chat history downloaded: ${selectedChat.title}`);
-            loadChatHistories(); // Reload histories
-        } catch (error) {
-            console.error('Error downloading chat history:', error);
-            showToast(error.message, 'error');
-        } finally {
-            downloadingChats.delete(selectedChat.id);
-            renderChats(); // Re-render to remove loading state
-        }
-    }
-
     // Event listeners
     accountSelect.addEventListener('change', updateFetchButton);
     fetchChatsBtn.addEventListener('click', fetchChats);
 
-    document.getElementById('close-download-modal').addEventListener('click', closeDownloadModal);
-    document.getElementById('cancel-download').addEventListener('click', closeDownloadModal);
-    document.getElementById('confirm-download').addEventListener('click', downloadChatHistory);
-
     document.getElementById('close-auth-modal').addEventListener('click', closeAuthModal);
     document.getElementById('close-auth-modal-btn').addEventListener('click', closeAuthModal);
 
-    // Close modals when clicking outside
-    downloadModal.addEventListener('click', (e) => {
-        if (e.target === downloadModal) {
-            closeDownloadModal();
-        }
-    });
-
+    // Close modal when clicking outside
     authRequiredModal.addEventListener('click', (e) => {
         if (e.target === authRequiredModal) {
             closeAuthModal();
@@ -447,7 +286,6 @@
     // Load data on page load
     document.addEventListener('DOMContentLoaded', () => {
         loadAccounts();
-        loadChatHistories();
     });
 </script>
 {% endblock %}
