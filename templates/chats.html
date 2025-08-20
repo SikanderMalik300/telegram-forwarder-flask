@@ -27,9 +27,51 @@
         <div id="no-accounts-warning" class="text-purple-300 text-sm mt-2 hidden">
             No accounts found. Please add an account first.
         </div>
+        
+        <div id="auth-warning" class="text-yellow-300 text-sm mt-2 hidden">
+            <i class="fas fa-exclamation-triangle mr-1"></i>
+            Selected account is not authenticated. Please authenticate it first.
+        </div>
     </div>
 </div>
 
+<!-- Authentication Required Modal -->
+<div id="auth-required-modal" class="fixed inset-0 z-50 hidden">
+    <div class="fixed inset-0 bg-black/50"></div>
+    <div class="fixed inset-0 flex items-center justify-center p-4">
+        <div class="glass rounded-lg w-full max-w-md p-6">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-xl font-semibold text-white">Authentication Required</h3>
+                <button id="close-auth-modal" class="text-purple-300 hover:text-white">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            
+            <div class="space-y-4">
+                <div class="text-center">
+                    <i class="fas fa-lock text-4xl text-yellow-400 mb-4"></i>
+                    <p class="text-purple-200 mb-2">
+                        The selected account needs to be authenticated before you can access chats.
+                    </p>
+                    <p class="text-purple-300 text-sm">
+                        Go to Account Management to authenticate your account.
+                    </p>
+                </div>
+                
+                <div class="flex justify-center space-x-2 pt-4">
+                    <button id="close-auth-modal-btn" class="px-4 py-2 text-purple-300 hover:text-white transition-colors">
+                        Close
+                    </button>
+                    <a href="/accounts" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
+                        <i class="fas fa-shield-alt mr-2"></i>Go to Accounts
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Rest of the chats interface remains the same -->
 <!-- Chats Grid -->
 <div id="chats-section" class="mb-8 hidden">
     <h2 class="text-xl font-semibold text-white mb-4">Available Chats</h2>
@@ -118,8 +160,10 @@
     const historiesContainer = document.getElementById('histories-container');
     const noChatsMessage = document.getElementById('no-chats-message');
     const downloadModal = document.getElementById('download-modal');
+    const authRequiredModal = document.getElementById('auth-required-modal');
     const selectedChatTitle = document.getElementById('selected-chat-title');
     const messageLimitInput = document.getElementById('message-limit');
+    const authWarning = document.getElementById('auth-warning');
 
     // Load accounts
     async function loadAccounts() {
@@ -130,18 +174,37 @@
             accounts.forEach(account => {
                 const option = document.createElement('option');
                 option.value = account.id;
-                option.textContent = `${account.name} (${account.phone_number})`;
+                option.textContent = `${account.name} (${account.phone_number})${account.is_authenticated ? '' : ' - Not Authenticated'}`;
+                option.dataset.authenticated = account.is_authenticated;
                 accountSelect.appendChild(option);
             });
 
             if (accounts.length === 0) {
                 document.getElementById('no-accounts-warning').classList.remove('hidden');
             } else {
-                accountSelect.value = accounts[0].id;
-                fetchChatsBtn.disabled = false;
+                // Auto-select first authenticated account
+                const firstAuthAccount = accounts.find(acc => acc.is_authenticated);
+                if (firstAuthAccount) {
+                    accountSelect.value = firstAuthAccount.id;
+                    updateFetchButton();
+                }
             }
         } catch (error) {
             console.error('Error loading accounts:', error);
+        }
+    }
+
+    // Update fetch button state based on selected account
+    function updateFetchButton() {
+        const selectedOption = accountSelect.options[accountSelect.selectedIndex];
+        const isAuthenticated = selectedOption && selectedOption.dataset.authenticated === 'true';
+        
+        fetchChatsBtn.disabled = !accountSelect.value || !isAuthenticated;
+        
+        if (accountSelect.value && !isAuthenticated) {
+            authWarning.classList.remove('hidden');
+        } else {
+            authWarning.classList.add('hidden');
         }
     }
 
@@ -160,6 +223,14 @@
         const accountId = accountSelect.value;
         if (!accountId) return;
 
+        const selectedOption = accountSelect.options[accountSelect.selectedIndex];
+        const isAuthenticated = selectedOption.dataset.authenticated === 'true';
+        
+        if (!isAuthenticated) {
+            authRequiredModal.classList.remove('hidden');
+            return;
+        }
+
         fetchChatsBtn.disabled = true;
         fetchIcon.className = 'fas fa-spinner fa-spin mr-2';
 
@@ -174,10 +245,18 @@
             showToast(`Found ${chats.length} chats`);
         } catch (error) {
             console.error('Error fetching chats:', error);
-            showToast('Failed to fetch chats from Telegram', 'error');
+            
+            if (error.message.includes('requires_auth') || error.message.includes('not authenticated')) {
+                authRequiredModal.classList.remove('hidden');
+                // Update account authentication status
+                loadAccounts();
+            } else {
+                showToast('Failed to fetch chats from Telegram', 'error');
+            }
         } finally {
-            fetchChatsBtn.disabled = false;
+            fetchChatsBtn.disabled = !accountSelect.value;
             fetchIcon.className = 'fas fa-sync mr-2';
+            updateFetchButton();
         }
     }
 
@@ -283,6 +362,11 @@
         selectedChat = null;
     }
 
+    // Close auth required modal
+    function closeAuthModal() {
+        authRequiredModal.classList.add('hidden');
+    }
+
     // Download chat history
     async function downloadChatHistory() {
         if (!selectedChat || !accountSelect.value) return;
@@ -337,20 +421,26 @@
     }
 
     // Event listeners
-    accountSelect.addEventListener('change', () => {
-        fetchChatsBtn.disabled = !accountSelect.value;
-    });
-
+    accountSelect.addEventListener('change', updateFetchButton);
     fetchChatsBtn.addEventListener('click', fetchChats);
 
     document.getElementById('close-download-modal').addEventListener('click', closeDownloadModal);
     document.getElementById('cancel-download').addEventListener('click', closeDownloadModal);
     document.getElementById('confirm-download').addEventListener('click', downloadChatHistory);
 
-    // Close modal when clicking outside
+    document.getElementById('close-auth-modal').addEventListener('click', closeAuthModal);
+    document.getElementById('close-auth-modal-btn').addEventListener('click', closeAuthModal);
+
+    // Close modals when clicking outside
     downloadModal.addEventListener('click', (e) => {
         if (e.target === downloadModal) {
             closeDownloadModal();
+        }
+    });
+
+    authRequiredModal.addEventListener('click', (e) => {
+        if (e.target === authRequiredModal) {
+            closeAuthModal();
         }
     });
 

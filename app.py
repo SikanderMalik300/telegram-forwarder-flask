@@ -39,6 +39,7 @@ class Account(db.Model):
     api_hash = db.Column(db.String(100), nullable=False)
     phone_number = db.Column(db.String(20), nullable=False)
     session_string = db.Column(db.Text)
+    is_authenticated = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -109,18 +110,56 @@ class TelegramService:
                 return True
             else:
                 logger.warning(f"User not authorized for {self.phone_number}")
-                # For production, you'd need to implement phone verification
-                # For now, we'll try to start with the existing session
-                try:
-                    await self.client.start(phone=self.phone_number)
-                    self.is_connected = True
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to start client: {e}")
-                    return False
+                # Don't try to start - this would require OTP
+                raise Exception("Account not authenticated. Please authenticate this account first using a session string.")
+                
         except Exception as e:
             logger.error(f"Connection error: {e}")
-            return False
+            raise Exception(f"Failed to connect: {str(e)}")
+
+    async def send_code_request(self):
+        """Send OTP code to phone number"""
+        try:
+            if not self.client:
+                self._create_client()
+            
+            await self.client.connect()
+            result = await self.client.send_code_request(self.phone_number)
+            return result.phone_code_hash
+        except Exception as e:
+            logger.error(f"Error sending code: {e}")
+            raise
+
+    async def verify_code(self, code, phone_code_hash, password=None):
+        """Verify OTP code and complete authentication"""
+        try:
+            if not self.client:
+                self._create_client()
+            
+            await self.client.connect()
+            
+            try:
+                user = await self.client.sign_in(self.phone_number, code, phone_code_hash=phone_code_hash)
+            except errors.SessionPasswordNeededError:
+                if password:
+                    user = await self.client.sign_in(password=password)
+                else:
+                    raise Exception("Two-factor authentication enabled. Password required.")
+            
+            # Get session string for future use
+            session_string = self.client.session.save()
+            self.is_connected = True
+            
+            return {
+                'success': True,
+                'session_string': session_string,
+                'user_id': user.id,
+                'first_name': user.first_name
+            }
+            
+        except Exception as e:
+            logger.error(f"Error verifying code: {e}")
+            raise
 
     async def get_dialogs(self):
         if not self.is_connected:
@@ -251,6 +290,7 @@ def api_accounts():
             'api_id': acc.api_id,
             'api_hash': acc.api_hash,
             'phone_number': acc.phone_number,
+            'is_authenticated': acc.is_authenticated,
             'created_at': acc.created_at.isoformat(),
             'updated_at': acc.updated_at.isoformat()
         } for acc in accounts])
@@ -261,7 +301,8 @@ def api_accounts():
             name=data['name'],
             api_id=data['api_id'],
             api_hash=data['api_hash'],
-            phone_number=data['phone_number']
+            phone_number=data['phone_number'],
+            is_authenticated=False
         )
         db.session.add(account)
         db.session.commit()
@@ -286,6 +327,80 @@ def api_account_detail(account_id):
         db.session.commit()
         return jsonify({'success': True})
 
+@app.route('/api/accounts/<int:account_id>/send_code', methods=['POST'])
+def api_send_code(account_id):
+    """Send OTP code to account phone number"""
+    if not TELEGRAM_AVAILABLE:
+        return jsonify({'error': 'Telegram client not available'}), 500
+        
+    account = Account.query.get_or_404(account_id)
+    
+    try:
+        service = TelegramService(
+            account.api_id,
+            account.api_hash,
+            account.phone_number
+        )
+        
+        async def send_code():
+            phone_code_hash = await service.send_code_request()
+            await service.disconnect()
+            return phone_code_hash
+        
+        phone_code_hash = run_async_safely(send_code())
+        
+        return jsonify({
+            'success': True,
+            'phone_code_hash': phone_code_hash,
+            'message': f'Verification code sent to {account.phone_number}'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error sending code: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/accounts/<int:account_id>/verify_code', methods=['POST'])
+def api_verify_code(account_id):
+    """Verify OTP code and authenticate account"""
+    if not TELEGRAM_AVAILABLE:
+        return jsonify({'error': 'Telegram client not available'}), 500
+        
+    data = request.json
+    code = data.get('code')
+    phone_code_hash = data.get('phone_code_hash')
+    password = data.get('password')  # For 2FA
+    
+    account = Account.query.get_or_404(account_id)
+    
+    try:
+        service = TelegramService(
+            account.api_id,
+            account.api_hash,
+            account.phone_number
+        )
+        
+        async def verify_code():
+            result = await service.verify_code(code, phone_code_hash, password)
+            await service.disconnect()
+            return result
+        
+        result = run_async_safely(verify_code())
+        
+        # Save session string and mark as authenticated
+        account.session_string = result['session_string']
+        account.is_authenticated = True
+        account.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Account authenticated successfully for {result["first_name"]}'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error verifying code: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/chats/list', methods=['POST'])
 def api_chats_list():
     if not TELEGRAM_AVAILABLE:
@@ -296,24 +411,35 @@ def api_chats_list():
     
     account = Account.query.get_or_404(account_id)
     
+    # Check if account is authenticated
+    if not account.is_authenticated or not account.session_string:
+        return jsonify({
+            'error': 'Account not authenticated',
+            'requires_auth': True,
+            'account_id': account_id
+        }), 401
+    
     try:
         # Create Telegram service
         service = TelegramService(
             account.api_id,
             account.api_hash,
             account.phone_number,
-            account.session_string or ""
+            account.session_string
         )
         
         async def get_chats():
             try:
                 connected = await service.connect()
                 if not connected:
-                    raise Exception('Failed to connect to Telegram')
+                    # Mark account as not authenticated if connection fails
+                    account.is_authenticated = False
+                    db.session.commit()
+                    raise Exception('Authentication expired. Please re-authenticate.')
                 
                 chats = await service.get_dialogs()
                 
-                # Save session string
+                # Update session string if it changed
                 session_string = service.get_session_string()
                 if session_string and session_string != account.session_string:
                     account.session_string = session_string
@@ -328,6 +454,15 @@ def api_chats_list():
     
     except Exception as e:
         logger.error(f"Error in api_chats_list: {e}")
+        # If authentication error, mark account as not authenticated
+        if "not authenticated" in str(e).lower() or "auth" in str(e).lower():
+            account.is_authenticated = False
+            db.session.commit()
+            return jsonify({
+                'error': 'Authentication expired. Please re-authenticate.',
+                'requires_auth': True,
+                'account_id': account_id
+            }), 401
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/chats/download', methods=['POST'])
@@ -343,13 +478,17 @@ def api_chats_download():
     
     account = Account.query.get_or_404(account_id)
     
+    # Check if account is authenticated
+    if not account.is_authenticated or not account.session_string:
+        return jsonify({'error': 'Account not authenticated'}), 401
+    
     try:
         # Create Telegram service
         service = TelegramService(
             account.api_id,
             account.api_hash,
             account.phone_number,
-            account.session_string or ""
+            account.session_string
         )
         
         async def download_history():
