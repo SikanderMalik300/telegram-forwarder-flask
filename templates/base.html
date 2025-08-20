@@ -45,6 +45,8 @@
             font-weight: 500;
             transform: translateX(400px);
             transition: transform 0.3s ease;
+            max-width: 400px;
+            word-wrap: break-word;
         }
         .toast.show {
             transform: translateX(0);
@@ -54,6 +56,9 @@
         }
         .toast.error {
             background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
+        }
+        .toast.info {
+            background: linear-gradient(135deg, #0ea5e9 0%, #3b82f6 100%);
         }
     </style>
 </head>
@@ -90,6 +95,10 @@
                 <a href="/forwarding" class="nav-link flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-all duration-200 text-purple-200 hover:bg-purple-800/30 hover:text-white">
                     <i class="fas fa-bolt w-5 h-5 mr-3"></i>
                     Forwarding Rules
+                </a>
+                <a href="/settings" class="nav-link flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-all duration-200 text-purple-200 hover:bg-purple-800/30 hover:text-white">
+                    <i class="fas fa-cog w-5 h-5 mr-3"></i>
+                    Settings
                 </a>
             </nav>
 
@@ -141,14 +150,17 @@
             }
         });
 
-        // Toast notification system
+        // Enhanced toast notification system
         function showToast(message, type = 'success') {
             const toast = document.createElement('div');
             toast.className = `toast ${type}`;
             toast.innerHTML = `
-                <div class="flex items-center">
-                    <i class="fas ${type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'} mr-2"></i>
-                    ${message}
+                <div class="flex items-start">
+                    <i class="fas ${type === 'success' ? 'fa-check-circle' : type === 'error' ? 'fa-exclamation-circle' : 'fa-info-circle'} mr-2 mt-0.5 flex-shrink-0"></i>
+                    <div class="flex-1">${message}</div>
+                    <button onclick="this.parentElement.parentElement.remove()" class="ml-2 text-white/80 hover:text-white">
+                        <i class="fas fa-times"></i>
+                    </button>
                 </div>
             `;
             
@@ -156,12 +168,18 @@
             
             setTimeout(() => toast.classList.add('show'), 100);
             setTimeout(() => {
-                toast.classList.remove('show');
-                setTimeout(() => toast.remove(), 300);
-            }, 3000);
+                if (toast.parentNode) {
+                    toast.classList.remove('show');
+                    setTimeout(() => {
+                        if (toast.parentNode) {
+                            toast.remove();
+                        }
+                    }, 300);
+                }
+            }, 5000);
         }
 
-        // API helper function
+        // Enhanced API helper function
         async function apiCall(url, options = {}) {
             try {
                 const response = await fetch(url, {
@@ -172,14 +190,45 @@
                     ...options
                 });
                 
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.error || 'Request failed');
+                // Check if response is actually JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    console.error('Non-JSON response received:', text);
+                    
+                    // Check if it's an HTML error page
+                    if (text.includes('<html') || text.includes('<!DOCTYPE')) {
+                        throw new Error('Server error occurred. Please check the server logs or try again later.');
+                    }
+                    
+                    throw new Error('Server returned an unexpected response format.');
                 }
                 
-                return await response.json();
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.error || data.message || `Request failed with status ${response.status}`);
+                }
+                
+                return data;
             } catch (error) {
-                showToast(error.message, 'error');
+                console.error('API call failed:', {
+                    url,
+                    options,
+                    error: error.message,
+                    stack: error.stack
+                });
+                
+                // Handle specific error types
+                if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+                    throw new Error('Network error: Unable to connect to server. Please check your internet connection.');
+                }
+                
+                if (error.name === 'SyntaxError' && error.message.includes('JSON')) {
+                    throw new Error('Server returned an invalid response. Please try again or contact support if the problem persists.');
+                }
+                
+                // Re-throw the original error if it's already a custom error
                 throw error;
             }
         }
@@ -187,6 +236,13 @@
         // Global variables
         window.showToast = showToast;
         window.apiCall = apiCall;
+
+        // Debug helper
+        window.debugMode = false;
+        function enableDebug() {
+            window.debugMode = true;
+            console.log('Debug mode enabled. API calls will be logged.');
+        }
     </script>
 
     {% block scripts %}{% endblock %}
