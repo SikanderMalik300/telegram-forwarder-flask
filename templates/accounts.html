@@ -153,6 +153,7 @@
     let editingAccountId = null;
     let currentAccountForOTP = null;
     let phoneCodeHash = null;
+    let tempSessionKey = null;
 
     // DOM elements
     const accountsContainer = document.getElementById('accounts-container');
@@ -289,6 +290,7 @@
         document.getElementById('2fa-section').classList.add('hidden');
         currentAccountForOTP = null;
         phoneCodeHash = null;
+        tempSessionKey = null;
     }
 
     // Edit account
@@ -327,6 +329,7 @@
             });
 
             phoneCodeHash = response.phone_code_hash;
+            tempSessionKey = response.temp_session_key;
             currentAccountForOTP = account;
             
             document.getElementById('otp-account-name').textContent = account.name;
@@ -363,7 +366,7 @@
             return;
         }
 
-        if (!currentAccountForOTP || !phoneCodeHash) {
+        if (!currentAccountForOTP || !phoneCodeHash || !tempSessionKey) {
             showToast('Invalid verification session', 'error');
             return;
         }
@@ -377,6 +380,7 @@
                 body: JSON.stringify({
                     code: code,
                     phone_code_hash: phoneCodeHash,
+                    temp_session_key: tempSessionKey,
                     password: password || undefined
                 })
             });
@@ -396,8 +400,8 @@
                 showToast('Invalid verification code. Please try again.', 'error');
                 document.getElementById('verification-code').focus();
                 document.getElementById('verification-code').select();
-            } else if (error.message.includes('PHONE_CODE_EXPIRED')) {
-                showToast('Verification code has expired. Please try again.', 'error');
+            } else if (error.message.includes('expired')) {
+                showToast('Verification session expired. Please try authenticating again.', 'error');
                 closeOTPModal();
             } else {
                 showToast('Verification failed: ' + error.message, 'error');

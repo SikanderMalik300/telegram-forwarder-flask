@@ -95,21 +95,123 @@ except ImportError as e:
 active_connections = {}
 active_forwarders = {}
 
+# Global storage for temporary sessions during authentication
+temp_auth_sessions = {}
+
 class TelegramService:
-    def __init__(self, api_id, api_hash, phone_number, session_string=""):
+    def __init__(self, api_id, api_hash, phone_number, session_string="", temp_session_key=None):
         if not TELEGRAM_AVAILABLE:
             raise Exception("Telegram client not available")
         
         self.api_id = int(api_id)
         self.api_hash = api_hash
         self.phone_number = phone_number
-        self.session = StringSession(session_string)
+        self.temp_session_key = temp_session_key
+        
+        # Use temporary session if provided, otherwise use permanent session
+        if temp_session_key and temp_session_key in temp_auth_sessions:
+            self.session = StringSession(temp_auth_sessions[temp_session_key])
+            logger.info(f"Using temporary session for {phone_number}")
+        else:
+            self.session = StringSession(session_string)
+            logger.info(f"Using permanent session for {phone_number}")
+            
         self.client = None
         self.is_connected = False
 
     def _create_client(self):
         """Create client in the same thread where it will be used"""
         self.client = TelegramClient(self.session, self.api_id, self.api_hash)
+
+    async def send_code_request(self):
+        """Send OTP code to phone number and store session"""
+        try:
+            if not self.client:
+                self._create_client()
+            
+            await self.client.connect()
+            result = await self.client.send_code_request(self.phone_number)
+            
+            # Store the session string for the verification step
+            session_string = self.client.session.save()
+            temp_session_key = f"{self.phone_number}_{result.phone_code_hash}"
+            temp_auth_sessions[temp_session_key] = session_string
+            
+            logger.info(f"Stored temporary session for {self.phone_number}")
+            
+            # Don't disconnect - keep the session alive
+            return {
+                'phone_code_hash': result.phone_code_hash,
+                'temp_session_key': temp_session_key
+            }
+        except Exception as e:
+            logger.error(f"Error sending code: {e}")
+            raise
+
+    async def verify_code(self, code, phone_code_hash, password=None):
+        """Verify OTP code using the same session that sent the code"""
+        try:
+            # Reconstruct the temp session key
+            temp_session_key = f"{self.phone_number}_{phone_code_hash}"
+            
+            if temp_session_key not in temp_auth_sessions:
+                raise Exception("Authentication session expired or not found. Please request a new code.")
+            
+            # Create new service instance with the temporary session
+            if not self.temp_session_key:
+                # Create a new instance with the temp session
+                service = TelegramService(
+                    self.api_id, 
+                    self.api_hash, 
+                    self.phone_number, 
+                    temp_session_key=temp_session_key
+                )
+                service._create_client()
+                await service.client.connect()
+                client = service.client
+            else:
+                # We already have the temp session
+                if not self.client:
+                    self._create_client()
+                await self.client.connect()
+                client = self.client
+            
+            try:
+                # Sign in with the code
+                user = await client.sign_in(
+                    phone=self.phone_number,
+                    code=code, 
+                    phone_code_hash=phone_code_hash
+                )
+            except errors.SessionPasswordNeededError:
+                if password:
+                    user = await client.sign_in(password=password)
+                else:
+                    raise Exception("Two-factor authentication enabled. Password required.")
+            
+            # Get the final session string for permanent storage
+            final_session_string = client.session.save()
+            
+            # Clean up temporary session
+            if temp_session_key in temp_auth_sessions:
+                del temp_auth_sessions[temp_session_key]
+            
+            await client.disconnect()
+            
+            return {
+                'success': True,
+                'session_string': final_session_string,
+                'user_id': user.id,
+                'first_name': user.first_name
+            }
+            
+        except Exception as e:
+            logger.error(f"Error verifying code: {e}")
+            # Clean up on error
+            temp_session_key = f"{self.phone_number}_{phone_code_hash}"
+            if temp_session_key in temp_auth_sessions:
+                del temp_auth_sessions[temp_session_key]
+            raise
 
     async def connect(self):
         try:
@@ -130,48 +232,121 @@ class TelegramService:
             logger.error(f"Connection error: {e}")
             raise Exception(f"Failed to connect: {str(e)}")
 
-    async def send_code_request(self):
-        """Send OTP code to phone number"""
+    async def list_chats(self):
+        """List all chats for the account (similar to your Python script)"""
         try:
             if not self.client:
                 self._create_client()
             
             await self.client.connect()
-            result = await self.client.send_code_request(self.phone_number)
-            return result.phone_code_hash
+            
+            if not await self.client.is_user_authorized():
+                raise Exception("Account not authenticated")
+            
+            dialogs = await self.client.get_dialogs()
+            chats = []
+            
+            for dialog in dialogs:
+                chat_info = {
+                    'id': dialog.id,
+                    'title': dialog.title or 'Unknown',
+                    'type': 'private' if dialog.is_user else ('channel' if dialog.is_channel else 'group'),
+                    'participant_count': getattr(dialog.entity, 'participants_count', None)
+                }
+                chats.append(chat_info)
+                
+            return chats
+            
         except Exception as e:
-            logger.error(f"Error sending code: {e}")
+            logger.error(f"Error listing chats: {e}")
             raise
 
-    async def verify_code(self, code, phone_code_hash, password=None):
-        """Verify OTP code and complete authentication"""
+    async def download_chat_history(self, chat_id, chat_title, limit=1000):
+        """Download chat history (similar to your Python script)"""
         try:
             if not self.client:
                 self._create_client()
             
             await self.client.connect()
             
-            try:
-                user = await self.client.sign_in(self.phone_number, code, phone_code_hash=phone_code_hash)
-            except errors.SessionPasswordNeededError:
-                if password:
-                    user = await self.client.sign_in(password=password)
+            if not await self.client.is_user_authorized():
+                raise Exception("Account not authenticated")
+            
+            messages = await self.client.get_messages(chat_id, limit=limit)
+            
+            # Create temporary file
+            temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8', suffix='.txt')
+            temp_file.write(f"Chat History: {chat_title}\n")
+            temp_file.write(f"Chat ID: {chat_id}\n")
+            temp_file.write(f"Downloaded: {datetime.utcnow().isoformat()}\n")
+            temp_file.write(f"Total Messages: {len(messages)}\n")
+            temp_file.write("-" * 50 + "\n\n")
+            
+            for message in reversed(messages):
+                if message.text:
+                    temp_file.write(f"[{message.date}] {message.sender_id}: {message.text}\n")
+                elif message.media:
+                    temp_file.write(f"[{message.date}] {message.sender_id}: [Media Message]\n")
                 else:
-                    raise Exception("Two-factor authentication enabled. Password required.")
+                    temp_file.write(f"[{message.date}] {message.sender_id}: [System Message]\n")
             
-            # Get session string for future use
-            session_string = self.client.session.save()
-            self.is_connected = True
-            
-            return {
-                'success': True,
-                'session_string': session_string,
-                'user_id': user.id,
-                'first_name': user.first_name
-            }
+            temp_file.close()
+            return temp_file.name, len(messages)
             
         except Exception as e:
-            logger.error(f"Error verifying code: {e}")
+            logger.error(f"Error downloading chat history: {e}")
+            raise
+
+    async def forward_messages_to_channel(self, source_chat_id, destination_channel_id, keywords):
+        """Forward messages from source to destination (like your Python script)"""
+        try:
+            if not self.client:
+                self._create_client()
+            
+            await self.client.connect()
+            
+            if not await self.client.is_user_authorized():
+                raise Exception("Account not authenticated")
+            
+            # Get the last message ID to start monitoring from
+            last_message_id = (await self.client.get_messages(source_chat_id, limit=1))[0].id
+            
+            logger.info(f"Starting message forwarding from {source_chat_id} to {destination_channel_id}")
+            
+            while True:
+                # Get new messages since the last checked message
+                messages = await self.client.get_messages(source_chat_id, min_id=last_message_id, limit=None)
+                
+                for message in reversed(messages):
+                    try:
+                        # Check if the message text includes any of the keywords
+                        should_forward = False
+                        
+                        if keywords:
+                            if message.text and any(keyword.lower() in message.text.lower() for keyword in keywords):
+                                logger.info(f"Message contains a keyword: {message.text[:50]}...")
+                                should_forward = True
+                        else:
+                            # Forward all messages if no keywords specified
+                            should_forward = True
+                        
+                        if should_forward and message.text:
+                            # Forward the message to the destination channel
+                            await self.client.send_message(destination_channel_id, message.text)
+                            logger.info("Message forwarded")
+                        
+                        # Update the last message ID
+                        last_message_id = max(last_message_id, message.id)
+                        
+                    except Exception as msg_error:
+                        logger.error(f"Error processing message {message.id}: {msg_error}")
+                        continue
+                
+                # Add a delay before checking for new messages again
+                await asyncio.sleep(5)  # Check every 5 seconds
+                
+        except Exception as e:
+            logger.error(f"Error in message forwarding: {e}")
             raise
 
     def get_session_string(self):
@@ -349,15 +524,16 @@ def api_send_code(account_id):
         )
         
         async def send_code():
-            phone_code_hash = await service.send_code_request()
-            await service.disconnect()
-            return phone_code_hash
+            result = await service.send_code_request()
+            # Don't disconnect here - keep session alive
+            return result
         
-        phone_code_hash = run_async_safely(send_code())
+        result = run_async_safely(send_code())
         
         return jsonify({
             'success': True,
-            'phone_code_hash': phone_code_hash,
+            'phone_code_hash': result['phone_code_hash'],
+            'temp_session_key': result['temp_session_key'],
             'message': f'Verification code sent to {account.phone_number}'
         })
         
@@ -375,19 +551,21 @@ def api_verify_code(account_id):
         data = request.json
         code = data.get('code')
         phone_code_hash = data.get('phone_code_hash')
+        temp_session_key = data.get('temp_session_key')  # New parameter
         password = data.get('password')  # For 2FA
         
         account = Account.query.get_or_404(account_id)
         
+        # Use the temporary session key
         service = TelegramService(
             account.api_id,
             account.api_hash,
-            account.phone_number
+            account.phone_number,
+            temp_session_key=temp_session_key
         )
         
         async def verify_code():
             result = await service.verify_code(code, phone_code_hash, password)
-            await service.disconnect()
             return result
         
         result = run_async_safely(verify_code())
@@ -406,6 +584,97 @@ def api_verify_code(account_id):
     except Exception as e:
         logger.error(f"Error verifying code: {e}")
         db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+# Chat listing route (like your Python script)
+@app.route('/api/chats/list', methods=['POST'])
+def api_list_chats():
+    """List chats for an account"""
+    try:
+        if not TELEGRAM_AVAILABLE:
+            return jsonify({'error': 'Telegram client not available'}), 500
+            
+        data = request.json
+        account_id = data.get('account_id')
+        
+        account = Account.query.get_or_404(account_id)
+        
+        if not account.is_authenticated or not account.session_string:
+            return jsonify({'error': 'Account not authenticated'}), 400
+        
+        service = TelegramService(
+            account.api_id,
+            account.api_hash,
+            account.phone_number,
+            account.session_string
+        )
+        
+        async def list_chats():
+            chats = await service.list_chats()
+            await service.disconnect()
+            return chats
+        
+        chats = run_async_safely(list_chats())
+        
+        return jsonify({
+            'success': True,
+            'chats': chats
+        })
+        
+    except Exception as e:
+        logger.error(f"Error listing chats: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# Chat download route (like your Python script)
+@app.route('/api/chats/download', methods=['POST'])
+def api_download_chat():
+    """Download chat history"""
+    try:
+        if not TELEGRAM_AVAILABLE:
+            return jsonify({'error': 'Telegram client not available'}), 500
+            
+        data = request.json
+        account_id = data.get('account_id')
+        chat_id = data.get('chat_id')
+        chat_title = data.get('chat_title')
+        limit = data.get('limit', 1000)
+        
+        account = Account.query.get_or_404(account_id)
+        
+        if not account.is_authenticated or not account.session_string:
+            return jsonify({'error': 'Account not authenticated'}), 400
+        
+        service = TelegramService(
+            account.api_id,
+            account.api_hash,
+            account.phone_number,
+            account.session_string
+        )
+        
+        async def download_chat():
+            file_path, message_count = await service.download_chat_history(chat_id, chat_title, limit)
+            await service.disconnect()
+            return file_path, message_count
+        
+        file_path, message_count = run_async_safely(download_chat())
+        
+        # Save to database
+        chat_history = ChatHistory(
+            account_id=account_id,
+            chat_id=chat_id,
+            chat_title=chat_title,
+            file_path=file_path,
+            message_count=message_count
+        )
+        db.session.add(chat_history)
+        db.session.commit()
+        
+        # Return file for download
+        return send_file(file_path, as_attachment=True, 
+                        download_name=f"{chat_title.replace(' ', '_')}_history.txt")
+        
+    except Exception as e:
+        logger.error(f"Error downloading chat: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/forwarding_rules', methods=['GET', 'POST'])
@@ -437,10 +706,62 @@ def api_forwarding_rules():
             )
             db.session.add(rule)
             db.session.commit()
+            
+            # Start forwarding if rule is active
+            if rule.is_active:
+                try:
+                    start_forwarding_rule(rule.id)
+                except Exception as e:
+                    logger.error(f"Failed to start forwarding rule {rule.id}: {e}")
+            
             return jsonify({'success': True, 'id': rule.id})
             
     except Exception as e:
         logger.error(f"Error in api_forwarding_rules: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/forwarding_rules/<int:rule_id>', methods=['PUT', 'DELETE'])
+def api_forwarding_rule_detail(rule_id):
+    try:
+        rule = ForwardingRule.query.get_or_404(rule_id)
+        
+        if request.method == 'PUT':
+            data = request.json
+            
+            # Stop current forwarding if active
+            if rule.is_active and rule_id in active_forwarders:
+                stop_forwarding_rule(rule_id)
+            
+            rule.name = data['name']
+            rule.account_id = data['account_id']
+            rule.source_chat_id = data['source_chat_id']
+            rule.destination_chat_id = data['destination_chat_id']
+            rule.keywords = json.dumps(data.get('keywords', []))
+            rule.is_active = data.get('is_active', False)
+            rule.updated_at = datetime.utcnow()
+            db.session.commit()
+            
+            # Start forwarding if rule is now active
+            if rule.is_active:
+                try:
+                    start_forwarding_rule(rule_id)
+                except Exception as e:
+                    logger.error(f"Failed to start forwarding rule {rule_id}: {e}")
+            
+            return jsonify({'success': True})
+        
+        elif request.method == 'DELETE':
+            # Stop forwarding if active
+            if rule.is_active and rule_id in active_forwarders:
+                stop_forwarding_rule(rule_id)
+            
+            db.session.delete(rule)
+            db.session.commit()
+            return jsonify({'success': True})
+            
+    except Exception as e:
+        logger.error(f"Error in api_forwarding_rule_detail: {e}")
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
@@ -461,6 +782,108 @@ def api_chat_histories():
         logger.error(f"Error in api_chat_histories: {e}")
         return jsonify({'error': str(e)}), 500
 
+# Forwarding management functions
+def start_forwarding_rule(rule_id):
+    """Start a forwarding rule in a background thread"""
+    try:
+        rule = ForwardingRule.query.get(rule_id)
+        if not rule or not rule.is_active:
+            return
+        
+        account = rule.account
+        if not account.is_authenticated or not account.session_string:
+            logger.error(f"Account {account.id} not authenticated for rule {rule_id}")
+            return
+        
+        # Don't start if already running
+        if rule_id in active_forwarders:
+            logger.info(f"Forwarding rule {rule_id} already active")
+            return
+        
+        # Create service instance
+        service = TelegramService(
+            account.api_id,
+            account.api_hash,
+            account.phone_number,
+            account.session_string
+        )
+        
+        # Parse keywords
+        keywords = json.loads(rule.keywords) if rule.keywords else []
+        
+        # Start forwarding in background thread
+        def run_forwarder():
+            try:
+                asyncio.run(service.forward_messages_to_channel(
+                    rule.source_chat_id,
+                    rule.destination_chat_id,
+                    keywords
+                ))
+            except Exception as e:
+                logger.error(f"Forwarding rule {rule_id} stopped with error: {e}")
+                # Remove from active forwarders
+                if rule_id in active_forwarders:
+                    del active_forwarders[rule_id]
+        
+        # Start thread
+        thread = threading.Thread(target=run_forwarder, daemon=True)
+        thread.start()
+        
+        # Store the thread reference
+        active_forwarders[rule_id] = {
+            'thread': thread,
+            'service': service,
+            'started_at': datetime.utcnow()
+        }
+        
+        logger.info(f"Started forwarding rule {rule_id}")
+        
+    except Exception as e:
+        logger.error(f"Failed to start forwarding rule {rule_id}: {e}")
+
+def stop_forwarding_rule(rule_id):
+    """Stop a forwarding rule"""
+    try:
+        if rule_id in active_forwarders:
+            forwarder_info = active_forwarders[rule_id]
+            
+            # Try to disconnect the service
+            try:
+                service = forwarder_info['service']
+                asyncio.run(service.disconnect())
+            except Exception as e:
+                logger.error(f"Error disconnecting service for rule {rule_id}: {e}")
+            
+            # Remove from active forwarders
+            del active_forwarders[rule_id]
+            logger.info(f"Stopped forwarding rule {rule_id}")
+        
+    except Exception as e:
+        logger.error(f"Failed to stop forwarding rule {rule_id}: {e}")
+
+def stop_all_forwarding_rules():
+    """Stop all active forwarding rules"""
+    rule_ids = list(active_forwarders.keys())
+    for rule_id in rule_ids:
+        stop_forwarding_rule(rule_id)
+
+# Start active rules on application startup
+def start_active_forwarding_rules():
+    """Start all active forwarding rules on application startup"""
+    try:
+        with app.app_context():
+            active_rules = ForwardingRule.query.filter_by(is_active=True).all()
+            logger.info(f"Starting {len(active_rules)} active forwarding rules")
+            
+            for rule in active_rules:
+                try:
+                    start_forwarding_rule(rule.id)
+                except Exception as e:
+                    logger.error(f"Failed to start rule {rule.id} on startup: {e}")
+                    
+    except Exception as e:
+        logger.error(f"Error starting active forwarding rules: {e}")
+
 # Initialize database
 def init_database():
     try:
@@ -471,8 +894,25 @@ def init_database():
         logger.error(f"Database creation error: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
 
+# Cleanup function for graceful shutdown
+def cleanup_on_exit():
+    """Cleanup function to stop all forwarding rules on exit"""
+    logger.info("Cleaning up forwarding rules...")
+    stop_all_forwarding_rules()
+
+import atexit
+atexit.register(cleanup_on_exit)
+
 # Initialize database on startup
 init_database()
+
+# Start active forwarding rules after a short delay
+def delayed_start_forwarders():
+    time.sleep(5)  # Wait 5 seconds for app to fully initialize
+    start_active_forwarding_rules()
+
+# Start forwarders in background thread
+threading.Thread(target=delayed_start_forwarders, daemon=True).start()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
