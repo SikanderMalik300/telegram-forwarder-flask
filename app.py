@@ -5,18 +5,24 @@ import os
 import asyncio
 import json
 import tempfile
-from telethon.sync import TelegramClient
-from telethon import errors
-from telethon.sessions import StringSession
 import threading
 import time
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 # Database configuration for Railway/Render (PostgreSQL)
 # For local development, use SQLite
 if os.environ.get('DATABASE_URL'):
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL').replace('postgres://', 'postgresql://')
+    database_url = os.environ.get('DATABASE_URL')
+    # Fix for SQLAlchemy 1.4+
+    if database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://')
+    app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 else:
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///telegram_forwarder.db'
 
@@ -60,81 +66,117 @@ class ChatHistory(db.Model):
     
     account = db.relationship('Account', backref=db.backref('chat_histories', lazy=True))
 
+# Import Telegram modules with better error handling
+try:
+    from telethon.sync import TelegramClient
+    from telethon import errors
+    from telethon.sessions import StringSession
+    TELEGRAM_AVAILABLE = True
+except ImportError as e:
+    logger.error(f"Telegram import failed: {e}")
+    TELEGRAM_AVAILABLE = False
+
 # Global storage for active connections and forwarders
 active_connections = {}
 active_forwarders = {}
 
 class TelegramService:
     def __init__(self, api_id, api_hash, phone_number, session_string=""):
+        if not TELEGRAM_AVAILABLE:
+            raise Exception("Telegram client not available")
+        
         self.api_id = int(api_id)
         self.api_hash = api_hash
         self.phone_number = phone_number
         self.session = StringSession(session_string)
-        self.client = TelegramClient(self.session, self.api_id, self.api_hash)
+        self.client = None
         self.is_connected = False
+
+    def _create_client(self):
+        """Create client in the same thread where it will be used"""
+        self.client = TelegramClient(self.session, self.api_id, self.api_hash)
 
     async def connect(self):
         try:
+            if not self.client:
+                self._create_client()
+                
             await self.client.connect()
+            
             if await self.client.is_user_authorized():
                 self.is_connected = True
+                logger.info(f"Connected to Telegram for {self.phone_number}")
                 return True
             else:
-                # Try to start client (this will handle authentication)
-                await self.client.start(phone=self.phone_number)
-                self.is_connected = True
-                return True
+                logger.warning(f"User not authorized for {self.phone_number}")
+                # For production, you'd need to implement phone verification
+                # For now, we'll try to start with the existing session
+                try:
+                    await self.client.start(phone=self.phone_number)
+                    self.is_connected = True
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to start client: {e}")
+                    return False
         except Exception as e:
-            print(f"Connection error: {e}")
+            logger.error(f"Connection error: {e}")
             return False
 
     async def get_dialogs(self):
         if not self.is_connected:
             raise Exception("Not connected to Telegram")
         
-        dialogs = await self.client.get_dialogs()
-        result = []
-        
-        for dialog in dialogs:
-            entity = dialog.entity
-            result.append({
-                'id': entity.id,
-                'title': getattr(entity, 'title', getattr(entity, 'first_name', 'Unknown')),
-                'type': self._get_dialog_type(entity),
-                'participant_count': getattr(entity, 'participants_count', None),
-                'username': getattr(entity, 'username', None),
-                'is_channel': getattr(entity, 'broadcast', False),
-                'is_group': getattr(entity, 'megagroup', False) or hasattr(entity, 'participants_count'),
-                'is_private': not hasattr(entity, 'title')
-            })
-        
-        return result
+        try:
+            dialogs = await self.client.get_dialogs()
+            result = []
+            
+            for dialog in dialogs:
+                entity = dialog.entity
+                result.append({
+                    'id': entity.id,
+                    'title': getattr(entity, 'title', getattr(entity, 'first_name', 'Unknown')),
+                    'type': self._get_dialog_type(entity),
+                    'participant_count': getattr(entity, 'participants_count', None),
+                    'username': getattr(entity, 'username', None),
+                    'is_channel': getattr(entity, 'broadcast', False),
+                    'is_group': getattr(entity, 'megagroup', False) or hasattr(entity, 'participants_count'),
+                    'is_private': not hasattr(entity, 'title')
+                })
+            
+            return result
+        except Exception as e:
+            logger.error(f"Error getting dialogs: {e}")
+            raise
 
     async def get_chat_history(self, chat_id, limit=1000):
         if not self.is_connected:
             raise Exception("Not connected to Telegram")
         
-        messages = await self.client.get_messages(int(chat_id), limit=limit)
-        result = []
-        
-        for msg in messages:
-            result.append({
-                'id': msg.id,
-                'text': msg.message or '',
-                'date': msg.date.timestamp(),
-                'from_id': str(msg.from_id) if msg.from_id else '',
-                'sender': {
-                    'first_name': getattr(msg.sender, 'first_name', '') if msg.sender else '',
-                    'last_name': getattr(msg.sender, 'last_name', '') if msg.sender else '',
-                    'username': getattr(msg.sender, 'username', '') if msg.sender else '',
-                },
-                'is_outgoing': msg.out,
-                'media_type': self._get_media_type(msg.media) if msg.media else None
-            })
-        
-        # Sort by date (oldest first)
-        result.sort(key=lambda x: x['date'])
-        return result
+        try:
+            messages = await self.client.get_messages(int(chat_id), limit=limit)
+            result = []
+            
+            for msg in messages:
+                result.append({
+                    'id': msg.id,
+                    'text': msg.message or '',
+                    'date': msg.date.timestamp(),
+                    'from_id': str(msg.from_id) if msg.from_id else '',
+                    'sender': {
+                        'first_name': getattr(msg.sender, 'first_name', '') if msg.sender else '',
+                        'last_name': getattr(msg.sender, 'last_name', '') if msg.sender else '',
+                        'username': getattr(msg.sender, 'username', '') if msg.sender else '',
+                    },
+                    'is_outgoing': msg.out,
+                    'media_type': self._get_media_type(msg.media) if msg.media else None
+                })
+            
+            # Sort by date (oldest first)
+            result.sort(key=lambda x: x['date'])
+            return result
+        except Exception as e:
+            logger.error(f"Error getting chat history: {e}")
+            raise
 
     def _get_dialog_type(self, entity):
         if getattr(entity, 'broadcast', False):
@@ -153,12 +195,29 @@ class TelegramService:
             return 'unknown'
 
     def get_session_string(self):
-        return self.session.save()
+        return self.session.save() if self.session else ''
 
     async def disconnect(self):
-        if self.client.is_connected():
+        if self.client and self.client.is_connected():
             await self.client.disconnect()
         self.is_connected = False
+
+def run_async_safely(coro):
+    """Run async function safely in Flask context"""
+    try:
+        # Try to get existing event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If loop is running, create a new one in a thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result(timeout=30)
+        else:
+            return loop.run_until_complete(coro)
+    except RuntimeError:
+        # No event loop, create a new one
+        return asyncio.run(coro)
 
 # Routes
 @app.route('/')
@@ -229,6 +288,9 @@ def api_account_detail(account_id):
 
 @app.route('/api/chats/list', methods=['POST'])
 def api_chats_list():
+    if not TELEGRAM_AVAILABLE:
+        return jsonify({'error': 'Telegram client not available'}), 500
+        
     data = request.json
     account_id = data['account_id']
     
@@ -243,33 +305,36 @@ def api_chats_list():
             account.session_string or ""
         )
         
-        # Run async function
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        async def get_chats():
+            try:
+                connected = await service.connect()
+                if not connected:
+                    raise Exception('Failed to connect to Telegram')
+                
+                chats = await service.get_dialogs()
+                
+                # Save session string
+                session_string = service.get_session_string()
+                if session_string and session_string != account.session_string:
+                    account.session_string = session_string
+                    db.session.commit()
+                
+                return chats
+            finally:
+                await service.disconnect()
         
-        try:
-            connected = loop.run_until_complete(service.connect())
-            if not connected:
-                return jsonify({'error': 'Failed to connect to Telegram'}), 500
-            
-            chats = loop.run_until_complete(service.get_dialogs())
-            
-            # Save session string
-            session_string = service.get_session_string()
-            if session_string:
-                account.session_string = session_string
-                db.session.commit()
-            
-            return jsonify({'success': True, 'chats': chats})
-        finally:
-            loop.run_until_complete(service.disconnect())
-            loop.close()
+        chats = run_async_safely(get_chats())
+        return jsonify({'success': True, 'chats': chats})
     
     except Exception as e:
+        logger.error(f"Error in api_chats_list: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/chats/download', methods=['POST'])
 def api_chats_download():
+    if not TELEGRAM_AVAILABLE:
+        return jsonify({'error': 'Telegram client not available'}), 500
+        
     data = request.json
     account_id = data['account_id']
     chat_id = data['chat_id']
@@ -287,68 +352,67 @@ def api_chats_download():
             account.session_string or ""
         )
         
-        # Run async function
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        async def download_history():
+            try:
+                connected = await service.connect()
+                if not connected:
+                    raise Exception('Failed to connect to Telegram')
+                
+                messages = await service.get_chat_history(chat_id, limit)
+                return messages
+            finally:
+                await service.disconnect()
         
-        try:
-            connected = loop.run_until_complete(service.connect())
-            if not connected:
-                return jsonify({'error': 'Failed to connect to Telegram'}), 500
-            
-            messages = loop.run_until_complete(service.get_chat_history(chat_id, limit))
-            
-            # Format messages as text (like Python script)
-            text_content = f"Chat History: {chat_title}\n"
-            text_content += f"Downloaded: {datetime.now().isoformat()}\n"
-            text_content += f"Total Messages: {len(messages)}\n"
-            text_content += f"Account: {account.name} ({account.phone_number})\n"
-            text_content += "=" * 80 + "\n\n"
-            
-            for message in messages:
-                date = datetime.fromtimestamp(message['date']).strftime('%Y-%m-%d %H:%M:%S')
-                
-                # Format sender name
-                sender = 'Unknown'
-                if message['sender']['first_name']:
-                    sender = f"{message['sender']['first_name']} {message['sender'].get('last_name', '')}".strip()
-                elif message['sender']['username']:
-                    sender = f"@{message['sender']['username']}"
-                elif message['from_id']:
-                    sender = f"User {message['from_id']}"
-                
-                direction = '→' if message['is_outgoing'] else '←'
-                media_info = f" [{message['media_type'].upper()}]" if message['media_type'] else ''
-                
-                text_content += f"{direction} [{date}] {sender}{media_info}:\n"
-                text_content += f"{message['text'] or '[Media/Non-text message]'}\n"
-                text_content += "-" * 50 + "\n\n"
-            
-            # Save chat history record
-            chat_history = ChatHistory(
-                account_id=account_id,
-                chat_id=chat_id,
-                chat_title=chat_title,
-                file_path=f"{chat_title}_{int(time.time())}.txt",
-                message_count=len(messages)
-            )
-            db.session.add(chat_history)
-            db.session.commit()
-            
-            # Create temporary file
-            temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8')
-            temp_file.write(text_content)
-            temp_file.close()
-            
-            filename = f"{chat_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.txt"
-            
-            return send_file(temp_file.name, as_attachment=True, download_name=filename, mimetype='text/plain')
+        messages = run_async_safely(download_history())
         
-        finally:
-            loop.run_until_complete(service.disconnect())
-            loop.close()
+        # Format messages as text (like Python script)
+        text_content = f"Chat History: {chat_title}\n"
+        text_content += f"Downloaded: {datetime.now().isoformat()}\n"
+        text_content += f"Total Messages: {len(messages)}\n"
+        text_content += f"Account: {account.name} ({account.phone_number})\n"
+        text_content += "=" * 80 + "\n\n"
+        
+        for message in messages:
+            date = datetime.fromtimestamp(message['date']).strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Format sender name
+            sender = 'Unknown'
+            if message['sender']['first_name']:
+                sender = f"{message['sender']['first_name']} {message['sender'].get('last_name', '')}".strip()
+            elif message['sender']['username']:
+                sender = f"@{message['sender']['username']}"
+            elif message['from_id']:
+                sender = f"User {message['from_id']}"
+            
+            direction = '→' if message['is_outgoing'] else '←'
+            media_info = f" [{message['media_type'].upper()}]" if message['media_type'] else ''
+            
+            text_content += f"{direction} [{date}] {sender}{media_info}:\n"
+            text_content += f"{message['text'] or '[Media/Non-text message]'}\n"
+            text_content += "-" * 50 + "\n\n"
+        
+        # Save chat history record
+        chat_history = ChatHistory(
+            account_id=account_id,
+            chat_id=chat_id,
+            chat_title=chat_title,
+            file_path=f"{chat_title}_{int(time.time())}.txt",
+            message_count=len(messages)
+        )
+        db.session.add(chat_history)
+        db.session.commit()
+        
+        # Create temporary file
+        temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8')
+        temp_file.write(text_content)
+        temp_file.close()
+        
+        filename = f"{chat_title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.txt"
+        
+        return send_file(temp_file.name, as_attachment=True, download_name=filename, mimetype='text/plain')
     
     except Exception as e:
+        logger.error(f"Error in api_chats_download: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/forwarding_rules', methods=['GET', 'POST'])
@@ -396,7 +460,11 @@ def api_chat_histories():
 
 # Initialize database
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+        logger.info("Database tables created successfully")
+    except Exception as e:
+        logger.error(f"Database creation error: {e}")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
