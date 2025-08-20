@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="mb-8">
+    <h1 class="text-3xl font-bold text-white mb-2">Dashboard</h1>
+    <p class="text-purple-300">Manage your Telegram forwarding operations</p>
+</div>
+
+<!-- Stats Cards -->
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+    <div class="glass rounded-lg p-6 bg-gradient-to-br from-purple-900/50 to-purple-800/30">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm font-medium text-purple-200">Total Accounts</p>
+                <p class="text-2xl font-bold text-white" id="total-accounts">0</p>
+                <p class="text-xs text-purple-300 mt-1">Connected Telegram accounts</p>
+            </div>
+            <i class="fas fa-shield-alt text-2xl text-purple-400"></i>
+        </div>
+    </div>
+
+    <div class="glass rounded-lg p-6 bg-gradient-to-br from-blue-900/50 to-blue-800/30">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm font-medium text-blue-200">Active Rules</p>
+                <p class="text-2xl font-bold text-white" id="active-rules">0</p>
+                <p class="text-xs text-blue-300 mt-1">Currently running</p>
+            </div>
+            <i class="fas fa-play text-2xl text-blue-400"></i>
+        </div>
+    </div>
+
+    <div class="glass rounded-lg p-6 bg-gradient-to-br from-green-900/50 to-green-800/30">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm font-medium text-green-200">Total Rules</p>
+                <p class="text-2xl font-bold text-white" id="total-rules">0</p>
+                <p class="text-xs text-green-300 mt-1">Forwarding configurations</p>
+            </div>
+            <i class="fas fa-bolt text-2xl text-green-400"></i>
+        </div>
+    </div>
+
+    <div class="glass rounded-lg p-6 bg-gradient-to-br from-pink-900/50 to-pink-800/30">
+        <div class="flex items-center justify-between">
+            <div>
+                <p class="text-sm font-medium text-pink-200">Chat Histories</p>
+                <p class="text-2xl font-bold text-white" id="total-histories">0</p>
+                <p class="text-xs text-pink-300 mt-1">Downloaded chats</p>
+            </div>
+            <i class="fas fa-download text-2xl text-pink-400"></i>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div class="glass rounded-lg">
+        <div class="p-6 border-b border-purple-700/30">
+            <h3 class="text-white font-semibold flex items-center">
+                <i class="fas fa-shield-alt mr-2"></i>
+                Recent Accounts
+            </h3>
+        </div>
+        <div class="p-6">
+            <div id="recent-accounts" class="space-y-3">
+                <!-- Accounts will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <div class="glass rounded-lg">
+        <div class="p-6 border-b border-purple-700/30">
+            <h3 class="text-white font-semibold flex items-center">
+                <i class="fas fa-bolt mr-2"></i>
+                Recent Forwarding Rules
+            </h3>
+        </div>
+        <div class="p-6">
+            <div id="recent-rules" class="space-y-3">
+                <!-- Rules will be loaded here -->
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Load dashboard data
+    async function loadDashboard() {
+        try {
+            // Load accounts
+            const accounts = await apiCall('/api/accounts');
+            document.getElementById('total-accounts').textContent = accounts.length;
+            
+            // Load forwarding rules
+            const rules = await apiCall('/api/forwarding_rules');
+            const activeRules = rules.filter(rule => rule.is_active);
+            document.getElementById('active-rules').textContent = activeRules.length;
+            document.getElementById('total-rules').textContent = rules.length;
+            
+            // Load chat histories
+            const histories = await apiCall('/api/chat_histories');
+            document.getElementById('total-histories').textContent = histories.length;
+            
+            // Display recent accounts
+            const recentAccountsContainer = document.getElementById('recent-accounts');
+            if (accounts.length === 0) {
+                recentAccountsContainer.innerHTML = `
+                    <div class="text-center py-8">
+                        <i class="fas fa-shield-alt text-4xl text-purple-400 mb-4"></i>
+                        <p class="text-purple-300 mb-4">No accounts configured yet</p>
+                        <a href="/accounts" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <i class="fas fa-plus mr-2"></i>Add First Account
+                        </a>
+                    </div>
+                `;
+            } else {
+                recentAccountsContainer.innerHTML = accounts.slice(0, 3).map(account => `
+                    <div class="flex items-center justify-between p-3 rounded-lg bg-purple-800/20">
+                        <div>
+                            <p class="text-white font-medium">${account.name}</p>
+                            <p class="text-purple-300 text-sm">${account.phone_number}</p>
+                        </div>
+                        <div class="w-2 h-2 bg-green-400 rounded-full"></div>
+                    </div>
+                `).join('') + (accounts.length > 3 ? `
+                    <a href="/accounts" class="block w-full text-center py-2 text-purple-300 hover:text-white transition-colors">
+                        View All Accounts (${accounts.length})
+                    </a>
+                ` : '');
+            }
+            
+            // Display recent rules
+            const recentRulesContainer = document.getElementById('recent-rules');
+            if (rules.length === 0) {
+                recentRulesContainer.innerHTML = `
+                    <div class="text-center py-8">
+                        <i class="fas fa-bolt text-4xl text-purple-400 mb-4"></i>
+                        <p class="text-purple-300 mb-4">No forwarding rules created yet</p>
+                        <a href="/forwarding" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <i class="fas fa-plus mr-2"></i>Create First Rule
+                        </a>
+                    </div>
+                `;
+            } else {
+                recentRulesContainer.innerHTML = rules.slice(0, 3).map(rule => `
+                    <div class="flex items-center justify-between p-3 rounded-lg bg-purple-800/20">
+                        <div>
+                            <p class="text-white font-medium">${rule.name}</p>
+                            <p class="text-purple-300 text-sm">
+                                ${rule.keywords.length > 0 ? `${rule.keywords.length} keywords` : 'All messages'}
+                            </p>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <i class="fas ${rule.is_active ? 'fa-play text-green-400' : 'fa-pause text-gray-400'}"></i>
+                        </div>
+                    </div>
+                `).join('') + (rules.length > 3 ? `
+                    <a href="/forwarding" class="block w-full text-center py-2 text-purple-300 hover:text-white transition-colors">
+                        View All Rules (${rules.length})
+                    </a>
+                ` : '');
+            }
+            
+        } catch (error) {
+            console.error('Error loading dashboard:', error);
+        }
+    }
+    
+    // Load dashboard on page load
+    document.addEventListener('DOMContentLoaded', loadDashboard);
+</script>
+{% endblock %}

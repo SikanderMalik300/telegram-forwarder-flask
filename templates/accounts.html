@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-8">
+    <div>
+        <h1 class="text-3xl font-bold text-white mb-2">Account Management</h1>
+        <p class="text-purple-300">Manage your Telegram API credentials</p>
+    </div>
+    
+    <button id="add-account-btn" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
+        <i class="fas fa-plus mr-2"></i>Add Account
+    </button>
+</div>
+
+<!-- Accounts Grid -->
+<div id="accounts-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+    <!-- Accounts will be loaded here -->
+</div>
+
+<!-- Add/Edit Account Modal -->
+<div id="account-modal" class="fixed inset-0 z-50 hidden">
+    <div class="fixed inset-0 bg-black/50"></div>
+    <div class="fixed inset-0 flex items-center justify-center p-4">
+        <div class="glass rounded-lg w-full max-w-md p-6">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="modal-title" class="text-xl font-semibold text-white">Add New Account</h3>
+                <button id="close-modal" class="text-purple-300 hover:text-white">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            
+            <form id="account-form" class="space-y-4">
+                <input type="hidden" id="account-id">
+                
+                <div>
+                    <label for="account-name" class="block text-purple-200 text-sm font-medium mb-2">
+                        Account Name
+                    </label>
+                    <input type="text" id="account-name" required
+                           class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white placeholder-purple-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                           placeholder="My Telegram Account">
+                </div>
+                
+                <div>
+                    <label for="api-id" class="block text-purple-200 text-sm font-medium mb-2">
+                        API ID
+                    </label>
+                    <input type="text" id="api-id" required
+                           class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white placeholder-purple-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                           placeholder="12345678">
+                </div>
+                
+                <div>
+                    <label for="api-hash" class="block text-purple-200 text-sm font-medium mb-2">
+                        API Hash
+                    </label>
+                    <input type="text" id="api-hash" required
+                           class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white placeholder-purple-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                           placeholder="abcdef1234567890abcdef1234567890">
+                </div>
+                
+                <div>
+                    <label for="phone-number" class="block text-purple-200 text-sm font-medium mb-2">
+                        Phone Number
+                    </label>
+                    <input type="text" id="phone-number" required
+                           class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white placeholder-purple-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                           placeholder="+1234567890">
+                </div>
+                
+                <div class="flex justify-end space-x-2 pt-4">
+                    <button type="button" id="cancel-btn" class="px-4 py-2 text-purple-300 hover:text-white transition-colors">
+                        Cancel
+                    </button>
+                    <button type="submit" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
+                        <span id="submit-text">Create Account</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let accounts = [];
+    let editingAccountId = null;
+
+    // DOM elements
+    const accountsContainer = document.getElementById('accounts-container');
+    const accountModal = document.getElementById('account-modal');
+    const accountForm = document.getElementById('account-form');
+    const addAccountBtn = document.getElementById('add-account-btn');
+    const closeModalBtn = document.getElementById('close-modal');
+    const cancelBtn = document.getElementById('cancel-btn');
+
+    // Load accounts
+    async function loadAccounts() {
+        try {
+            accounts = await apiCall('/api/accounts');
+            renderAccounts();
+        } catch (error) {
+            console.error('Error loading accounts:', error);
+        }
+    }
+
+    // Render accounts
+    function renderAccounts() {
+        if (accounts.length === 0) {
+            accountsContainer.innerHTML = `
+                <div class="col-span-full">
+                    <div class="glass rounded-lg p-12 text-center">
+                        <i class="fas fa-shield-alt text-6xl text-purple-400 mb-4"></i>
+                        <h3 class="text-xl font-semibold text-white mb-2">No accounts yet</h3>
+                        <p class="text-purple-300 mb-6">Get started by adding your first Telegram account</p>
+                        <button onclick="openModal()" class="bg-purple-600 hover:bg-purple-700 text-white px-6 py-3 rounded-lg transition-colors">
+                            <i class="fas fa-plus mr-2"></i>Add First Account
+                        </button>
+                    </div>
+                </div>
+            `;
+        } else {
+            accountsContainer.innerHTML = accounts.map(account => `
+                <div class="glass rounded-lg hover:bg-purple-900/40 transition-colors">
+                    <div class="p-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center">
+                                <i class="fas fa-shield-alt text-purple-400 mr-2"></i>
+                                <h3 class="text-white font-medium">${account.name}</h3>
+                            </div>
+                            <div class="w-2 h-2 bg-green-400 rounded-full" title="Connected"></div>
+                        </div>
+                        
+                        <div class="space-y-2 mb-4">
+                            <div class="flex items-center text-sm">
+                                <i class="fas fa-phone text-purple-400 mr-2"></i>
+                                <span class="text-purple-200">${account.phone_number}</span>
+                            </div>
+                            <div class="flex items-center text-sm">
+                                <i class="fas fa-key text-purple-400 mr-2"></i>
+                                <span class="text-purple-200">API ID: ${account.api_id}</span>
+                            </div>
+                            <div class="text-xs text-purple-400">
+                                Added ${new Date(account.created_at).toLocaleDateString()}
+                            </div>
+                        </div>
+                        
+                        <div class="flex justify-end space-x-2">
+                            <button onclick="editAccount(${account.id})" class="text-purple-300 hover:text-white hover:bg-purple-800/50 p-2 rounded transition-colors">
+                                <i class="fas fa-edit"></i>
+                            </button>
+                            <button onclick="deleteAccount(${account.id})" class="text-red-400 hover:text-red-300 hover:bg-red-900/50 p-2 rounded transition-colors">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+    }
+
+    // Open modal
+    function openModal(account = null) {
+        editingAccountId = account ? account.id : null;
+        
+        if (account) {
+            document.getElementById('modal-title').textContent = 'Edit Account';
+            document.getElementById('submit-text').textContent = 'Update Account';
+            document.getElementById('account-id').value = account.id;
+            document.getElementById('account-name').value = account.name;
+            document.getElementById('api-id').value = account.api_id;
+            document.getElementById('api-hash').value = account.api_hash;
+            document.getElementById('phone-number').value = account.phone_number;
+        } else {
+            document.getElementById('modal-title').textContent = 'Add New Account';
+            document.getElementById('submit-text').textContent = 'Create Account';
+            accountForm.reset();
+        }
+        
+        accountModal.classList.remove('hidden');
+    }
+
+    // Close modal
+    function closeModal() {
+        accountModal.classList.add('hidden');
+        accountForm.reset();
+        editingAccountId = null;
+    }
+
+    // Edit account
+    function editAccount(accountId) {
+        const account = accounts.find(acc => acc.id === accountId);
+        if (account) {
+            openModal(account);
+        }
+    }
+
+    // Delete account
+    async function deleteAccount(accountId) {
+        if (!confirm('Are you sure you want to delete this account?')) return;
+        
+        try {
+            await apiCall(`/api/accounts/${accountId}`, { method: 'DELETE' });
+            showToast('Account deleted successfully');
+            loadAccounts();
+        } catch (error) {
+            console.error('Error deleting account:', error);
+        }
+    }
+
+    // Form submission
+    accountForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const formData = {
+            name: document.getElementById('account-name').value,
+            api_id: document.getElementById('api-id').value,
+            api_hash: document.getElementById('api-hash').value,
+            phone_number: document.getElementById('phone-number').value
+        };
+        
+        try {
+            if (editingAccountId) {
+                await apiCall(`/api/accounts/${editingAccountId}`, {
+                    method: 'PUT',
+                    body: JSON.stringify(formData)
+                });
+                showToast('Account updated successfully');
+            } else {
+                await apiCall('/api/accounts', {
+                    method: 'POST',
+                    body: JSON.stringify(formData)
+                });
+                showToast('Account created successfully');
+            }
+            
+            closeModal();
+            loadAccounts();
+        } catch (error) {
+            console.error('Error saving account:', error);
+        }
+    });
+
+    // Event listeners
+    addAccountBtn.addEventListener('click', () => openModal());
+    closeModalBtn.addEventListener('click', closeModal);
+    cancelBtn.addEventListener('click', closeModal);
+
+    // Close modal when clicking outside
+    accountModal.addEventListener('click', (e) => {
+        if (e.target === accountModal) {
+            closeModal();
+        }
+    });
+
+    // Load accounts on page load
+    document.addEventListener('DOMContentLoaded', loadAccounts);
+</script>
+{% endblock %}

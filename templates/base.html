@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Telegram Forwarder{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        purple: {
+                            950: '#2e1065',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #2e1065 0%, #1e293b 50%, #2e1065 100%);
+            min-height: 100vh;
+        }
+        .sidebar-active {
+            background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
+            box-shadow: 0 10px 25px -5px rgba(124, 58, 237, 0.25);
+        }
+        .glass {
+            background: rgba(147, 51, 234, 0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(147, 51, 234, 0.2);
+        }
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            padding: 16px 24px;
+            border-radius: 8px;
+            color: white;
+            font-weight: 500;
+            transform: translateX(400px);
+            transition: transform 0.3s ease;
+        }
+        .toast.show {
+            transform: translateX(0);
+        }
+        .toast.success {
+            background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+        }
+        .toast.error {
+            background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
+        }
+    </style>
+</head>
+<body>
+    <!-- Mobile menu button -->
+    <button id="mobile-menu-btn" class="fixed top-4 left-4 z-50 md:hidden glass p-3 rounded-lg text-white">
+        <i class="fas fa-bars"></i>
+    </button>
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="fixed inset-y-0 left-0 z-40 w-64 glass transition-transform duration-300 ease-in-out -translate-x-full md:translate-x-0">
+        <div class="flex flex-col h-full">
+            <!-- Logo -->
+            <div class="flex items-center justify-center h-16 px-6 border-b border-purple-700/30">
+                <h1 class="text-xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+                    Telegram Forwarder
+                </h1>
+            </div>
+
+            <!-- Navigation -->
+            <nav class="flex-1 px-4 py-6 space-y-2">
+                <a href="/" class="nav-link flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-all duration-200 text-purple-200 hover:bg-purple-800/30 hover:text-white">
+                    <i class="fas fa-home w-5 h-5 mr-3"></i>
+                    Dashboard
+                </a>
+                <a href="/accounts" class="nav-link flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-all duration-200 text-purple-200 hover:bg-purple-800/30 hover:text-white">
+                    <i class="fas fa-shield-alt w-5 h-5 mr-3"></i>
+                    Account Management
+                </a>
+                <a href="/chats" class="nav-link flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-all duration-200 text-purple-200 hover:bg-purple-800/30 hover:text-white">
+                    <i class="fas fa-comments w-5 h-5 mr-3"></i>
+                    Chat Browser
+                </a>
+                <a href="/forwarding" class="nav-link flex items-center px-4 py-3 text-sm font-medium rounded-lg transition-all duration-200 text-purple-200 hover:bg-purple-800/30 hover:text-white">
+                    <i class="fas fa-bolt w-5 h-5 mr-3"></i>
+                    Forwarding Rules
+                </a>
+            </nav>
+
+            <!-- Footer -->
+            <div class="p-4 border-t border-purple-700/30">
+                <div class="text-xs text-purple-300 text-center">
+                    v1.0.0 • Built with Flask
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Mobile overlay -->
+    <div id="mobile-overlay" class="fixed inset-0 z-30 bg-black/50 md:hidden hidden"></div>
+
+    <!-- Main content -->
+    <main class="flex-1 md:ml-64">
+        <div class="p-8 pt-20 md:pt-8">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    <!-- Toast container -->
+    <div id="toast-container"></div>
+
+    <script>
+        // Mobile menu functionality
+        const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+        const sidebar = document.getElementById('sidebar');
+        const mobileOverlay = document.getElementById('mobile-overlay');
+
+        mobileMenuBtn.addEventListener('click', () => {
+            sidebar.classList.toggle('-translate-x-full');
+            mobileOverlay.classList.toggle('hidden');
+        });
+
+        mobileOverlay.addEventListener('click', () => {
+            sidebar.classList.add('-translate-x-full');
+            mobileOverlay.classList.add('hidden');
+        });
+
+        // Active navigation highlighting
+        const currentPath = window.location.pathname;
+        const navLinks = document.querySelectorAll('.nav-link');
+        navLinks.forEach(link => {
+            if (link.getAttribute('href') === currentPath) {
+                link.classList.remove('text-purple-200', 'hover:bg-purple-800/30');
+                link.classList.add('sidebar-active', 'text-white');
+            }
+        });
+
+        // Toast notification system
+        function showToast(message, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.innerHTML = `
+                <div class="flex items-center">
+                    <i class="fas ${type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'} mr-2"></i>
+                    ${message}
+                </div>
+            `;
+            
+            document.getElementById('toast-container').appendChild(toast);
+            
+            setTimeout(() => toast.classList.add('show'), 100);
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // API helper function
+        async function apiCall(url, options = {}) {
+            try {
+                const response = await fetch(url, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    },
+                    ...options
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Request failed');
+                }
+                
+                return await response.json();
+            } catch (error) {
+                showToast(error.message, 'error');
+                throw error;
+            }
+        }
+
+        // Global variables
+        window.showToast = showToast;
+        window.apiCall = apiCall;
+    </script>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
