@@ -4,7 +4,7 @@
 <div class="flex justify-between items-center mb-8">
     <div>
         <h1 class="text-3xl font-bold text-white mb-2">Forwarding Rules</h1>
-        <p class="text-purple-300">Create and manage message forwarding automation</p>
+        <p class="text-purple-300">Create and manage message forwarding automation with custom delays</p>
     </div>
     
     <button id="create-rule-btn" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
@@ -91,6 +91,34 @@
                     </p>
                 </div>
                 
+                <!-- NEW: Delay Settings -->
+                <div>
+                    <label for="delay-seconds" class="block text-purple-200 text-sm font-medium mb-2">
+                        <i class="fas fa-clock mr-1"></i>Forward Delay
+                    </label>
+                    <div class="flex items-center space-x-2">
+                        <input type="number" id="delay-seconds" min="0" max="3600" value="0"
+                               class="flex-1 px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white placeholder-purple-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                               placeholder="0">
+                        <span class="text-purple-300 text-sm">seconds</span>
+                    </div>
+                    <div class="flex justify-between text-xs text-purple-400 mt-1">
+                        <span>0 = Instant forward</span>
+                        <span>Max: 1 hour (3600s)</span>
+                    </div>
+                    
+                    <!-- Quick Delay Buttons -->
+                    <div class="flex flex-wrap gap-1 mt-2">
+                        <button type="button" onclick="setDelay(0)" class="px-2 py-1 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-xs transition-colors">Instant</button>
+                        <button type="button" onclick="setDelay(10)" class="px-2 py-1 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-xs transition-colors">10s</button>
+                        <button type="button" onclick="setDelay(30)" class="px-2 py-1 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-xs transition-colors">30s</button>
+                        <button type="button" onclick="setDelay(60)" class="px-2 py-1 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-xs transition-colors">1m</button>
+                        <button type="button" onclick="setDelay(300)" class="px-2 py-1 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-xs transition-colors">5m</button>
+                        <button type="button" onclick="setDelay(600)" class="px-2 py-1 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-xs transition-colors">10m</button>
+                        <button type="button" onclick="setDelay(1800)" class="px-2 py-1 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-xs transition-colors">30m</button>
+                    </div>
+                </div>
+                
                 <div class="flex items-center space-x-2">
                     <input type="checkbox" id="is-active" class="w-4 h-4 text-purple-600 border border-purple-700/50 rounded focus:ring-purple-500">
                     <label for="is-active" class="text-purple-200 text-sm">Start immediately</label>
@@ -123,6 +151,25 @@
     const createRuleBtn = document.getElementById('create-rule-btn');
     const noAccountsWarning = document.getElementById('no-accounts-warning');
 
+    // Set delay function for quick buttons
+    function setDelay(seconds) {
+        document.getElementById('delay-seconds').value = seconds;
+    }
+
+    // Format delay for display
+    function formatDelay(seconds) {
+        if (seconds === 0) return 'Instant';
+        if (seconds < 60) return `${seconds}s`;
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`.replace(' 0s', '');
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+        let result = `${hours}h`;
+        if (minutes > 0) result += ` ${minutes}m`;
+        if (secs > 0) result += ` ${secs}s`;
+        return result;
+    }
+
     // Load data
     async function loadData() {
         try {
@@ -139,6 +186,7 @@
             }
         } catch (error) {
             console.error('Error loading data:', error);
+            showToast('Failed to load data', 'error');
         }
     }
 
@@ -202,6 +250,12 @@
                                     <span class="text-purple-300">To: ${rule.destination_chat_id}</span>
                                 </div>
                                 
+                                <!-- Display Delay -->
+                                <div class="flex items-center space-x-2 text-sm">
+                                    <i class="fas fa-clock text-purple-400"></i>
+                                    <span class="text-purple-300">Delay: ${formatDelay(rule.delay_seconds)}</span>
+                                </div>
+                                
                                 ${rule.keywords.length > 0 ? `
                                     <div class="flex items-start space-x-2 text-sm">
                                         <i class="fas fa-tag text-purple-400 mt-0.5"></i>
@@ -252,11 +306,13 @@
             document.getElementById('source-chat-id').value = rule.source_chat_id;
             document.getElementById('destination-chat-id').value = rule.destination_chat_id;
             document.getElementById('keywords').value = rule.keywords.join(', ');
+            document.getElementById('delay-seconds').value = rule.delay_seconds || 0;
             document.getElementById('is-active').checked = rule.is_active;
         } else {
             document.getElementById('rule-modal-title').textContent = 'Create New Forwarding Rule';
             document.getElementById('rule-submit-text').textContent = 'Create Rule';
             ruleForm.reset();
+            document.getElementById('delay-seconds').value = 0;
         }
         
         ruleModal.classList.remove('hidden');
@@ -287,6 +343,7 @@
             loadData();
         } catch (error) {
             console.error('Error deleting rule:', error);
+            showToast('Failed to delete rule: ' + error.message, 'error');
         }
     }
 
@@ -298,13 +355,17 @@
         try {
             await apiCall(`/api/forwarding_rules/${ruleId}`, {
                 method: 'PUT',
-                body: JSON.stringify({ ...rule, is_active: !rule.is_active })
+                body: JSON.stringify({ 
+                    ...rule, 
+                    is_active: !rule.is_active 
+                })
             });
             
             showToast(`Forwarding rule ${!rule.is_active ? 'started' : 'stopped'}`);
             loadData();
         } catch (error) {
             console.error('Error toggling rule:', error);
+            showToast('Failed to toggle rule: ' + error.message, 'error');
         }
     }
 
@@ -316,6 +377,14 @@
             .split(',')
             .map(k => k.trim())
             .filter(k => k);
+        
+        const delaySeconds = parseInt(document.getElementById('delay-seconds').value) || 0;
+        
+        // Validate delay
+        if (delaySeconds < 0 || delaySeconds > 3600) {
+            showToast('Delay must be between 0 and 3600 seconds (1 hour)', 'error');
+            return;
+        }
             
         const formData = {
             name: document.getElementById('rule-name').value,
@@ -323,10 +392,13 @@
             source_chat_id: parseInt(document.getElementById('source-chat-id').value),
             destination_chat_id: parseInt(document.getElementById('destination-chat-id').value),
             keywords: keywords,
+            delay_seconds: delaySeconds,
             is_active: document.getElementById('is-active').checked
         };
         
         try {
+            document.getElementById('rule-submit-text').textContent = editingRuleId ? 'Updating...' : 'Creating...';
+            
             if (editingRuleId) {
                 await apiCall(`/api/forwarding_rules/${editingRuleId}`, {
                     method: 'PUT',
@@ -345,6 +417,9 @@
             loadData();
         } catch (error) {
             console.error('Error saving rule:', error);
+            showToast('Failed to save rule: ' + error.message, 'error');
+        } finally {
+            document.getElementById('rule-submit-text').textContent = editingRuleId ? 'Update Rule' : 'Create Rule';
         }
     });
 

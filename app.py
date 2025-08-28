@@ -34,7 +34,7 @@ except Exception as e:
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///telegram_forwarder.db'
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-super-secret-key-change-this-in-production')
 
 # Initialize database with error handling
 try:
@@ -63,6 +63,7 @@ class ForwardingRule(db.Model):
     source_chat_id = db.Column(db.BigInteger, nullable=False)
     destination_chat_id = db.Column(db.BigInteger, nullable=False)
     keywords = db.Column(db.Text)  # JSON string
+    delay_seconds = db.Column(db.Integer, default=0)  # Delay in seconds
     is_active = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -233,7 +234,7 @@ class TelegramService:
             raise Exception(f"Failed to connect: {str(e)}")
 
     async def list_chats(self):
-        """List all chats for the account (similar to your Python script)"""
+        """List all chats for the account"""
         try:
             if not self.client:
                 self._create_client()
@@ -261,44 +262,8 @@ class TelegramService:
             logger.error(f"Error listing chats: {e}")
             raise
 
-    async def download_chat_history(self, chat_id, chat_title, limit=1000):
-        """Download chat history (similar to your Python script)"""
-        try:
-            if not self.client:
-                self._create_client()
-            
-            await self.client.connect()
-            
-            if not await self.client.is_user_authorized():
-                raise Exception("Account not authenticated")
-            
-            messages = await self.client.get_messages(chat_id, limit=limit)
-            
-            # Create temporary file
-            temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8', suffix='.txt')
-            temp_file.write(f"Chat History: {chat_title}\n")
-            temp_file.write(f"Chat ID: {chat_id}\n")
-            temp_file.write(f"Downloaded: {datetime.utcnow().isoformat()}\n")
-            temp_file.write(f"Total Messages: {len(messages)}\n")
-            temp_file.write("-" * 50 + "\n\n")
-            
-            for message in reversed(messages):
-                if message.text:
-                    temp_file.write(f"[{message.date}] {message.sender_id}: {message.text}\n")
-                elif message.media:
-                    temp_file.write(f"[{message.date}] {message.sender_id}: [Media Message]\n")
-                else:
-                    temp_file.write(f"[{message.date}] {message.sender_id}: [System Message]\n")
-            
-            temp_file.close()
-            return temp_file.name, len(messages)
-            
-        except Exception as e:
-            logger.error(f"Error downloading chat history: {e}")
-            raise
-
-    async def forward_messages_to_channel(self, source_chat_id, destination_channel_id, keywords):
-        """Forward messages from source to destination (like your Python script)"""
+    async def forward_messages_to_channel_with_delay(self, source_chat_id, destination_channel_id, keywords, delay_seconds=0):
+        """Forward messages from source to destination with configurable delay"""
         try:
             if not self.client:
                 self._create_client()
@@ -309,44 +274,93 @@ class TelegramService:
                 raise Exception("Account not authenticated")
             
             # Get the last message ID to start monitoring from
-            last_message_id = (await self.client.get_messages(source_chat_id, limit=1))[0].id
+            try:
+                last_messages = await self.client.get_messages(source_chat_id, limit=1)
+                if last_messages:
+                    last_message_id = last_messages[0].id
+                else:
+                    last_message_id = 0
+            except Exception as e:
+                logger.warning(f"Could not get last message ID for {source_chat_id}: {e}")
+                last_message_id = 0
             
-            logger.info(f"Starting message forwarding from {source_chat_id} to {destination_channel_id}")
+            logger.info(f"Starting message forwarding from {source_chat_id} to {destination_channel_id} with {delay_seconds}s delay")
+            
+            # Queue to store messages for delayed sending
+            message_queue = []
             
             while True:
-                # Get new messages since the last checked message
-                messages = await self.client.get_messages(source_chat_id, min_id=last_message_id, limit=None)
-                
-                for message in reversed(messages):
-                    try:
-                        # Check if the message text includes any of the keywords
-                        should_forward = False
-                        
-                        if keywords:
-                            if message.text and any(keyword.lower() in message.text.lower() for keyword in keywords):
-                                logger.info(f"Message contains a keyword: {message.text[:50]}...")
+                try:
+                    # Get new messages since the last checked message
+                    messages = await self.client.get_messages(source_chat_id, min_id=last_message_id, limit=None)
+                    
+                    for message in reversed(messages):
+                        try:
+                            # Check if the message text includes any of the keywords
+                            should_forward = False
+                            
+                            if keywords:
+                                if message.text and any(keyword.lower() in message.text.lower() for keyword in keywords):
+                                    logger.info(f"Message contains a keyword: {message.text[:50]}...")
+                                    should_forward = True
+                            else:
+                                # Forward all messages if no keywords specified
                                 should_forward = True
+                            
+                            if should_forward and message.text:
+                                if delay_seconds > 0:
+                                    # Add to queue with timestamp for delayed sending
+                                    send_time = datetime.utcnow().timestamp() + delay_seconds
+                                    message_queue.append({
+                                        'text': message.text,
+                                        'send_time': send_time,
+                                        'original_message_id': message.id
+                                    })
+                                    logger.info(f"Message queued for delayed sending in {delay_seconds}s")
+                                else:
+                                    # Send immediately
+                                    await self.client.send_message(destination_channel_id, message.text)
+                                    logger.info("Message forwarded immediately")
+                            
+                            # Update the last message ID
+                            last_message_id = max(last_message_id, message.id)
+                            
+                        except Exception as msg_error:
+                            logger.error(f"Error processing message {message.id}: {msg_error}")
+                            continue
+                    
+                    # Process delayed messages
+                    current_time = datetime.utcnow().timestamp()
+                    messages_to_send = []
+                    remaining_messages = []
+                    
+                    for queued_msg in message_queue:
+                        if current_time >= queued_msg['send_time']:
+                            messages_to_send.append(queued_msg)
                         else:
-                            # Forward all messages if no keywords specified
-                            should_forward = True
-                        
-                        if should_forward and message.text:
-                            # Forward the message to the destination channel
-                            await self.client.send_message(destination_channel_id, message.text)
-                            logger.info("Message forwarded")
-                        
-                        # Update the last message ID
-                        last_message_id = max(last_message_id, message.id)
-                        
-                    except Exception as msg_error:
-                        logger.error(f"Error processing message {message.id}: {msg_error}")
-                        continue
-                
-                # Add a delay before checking for new messages again
-                await asyncio.sleep(5)  # Check every 5 seconds
-                
+                            remaining_messages.append(queued_msg)
+                    
+                    # Send delayed messages
+                    for msg_to_send in messages_to_send:
+                        try:
+                            await self.client.send_message(destination_channel_id, msg_to_send['text'])
+                            logger.info(f"Delayed message sent after {delay_seconds}s delay")
+                        except Exception as send_error:
+                            logger.error(f"Error sending delayed message: {send_error}")
+                    
+                    # Update message queue
+                    message_queue = remaining_messages
+                    
+                    # Add a delay before checking for new messages again
+                    await asyncio.sleep(2)  # Check every 2 seconds for new messages and queue processing
+                    
+                except Exception as loop_error:
+                    logger.error(f"Error in forwarding loop: {loop_error}")
+                    await asyncio.sleep(5)  # Wait longer on error
+                    continue
+                    
         except Exception as e:
-            logger.error(f"Error in message forwarding: {e}")
+            logger.error(f"Error in message forwarding with delay: {e}")
             raise
 
     def get_session_string(self):
@@ -551,7 +565,7 @@ def api_verify_code(account_id):
         data = request.json
         code = data.get('code')
         phone_code_hash = data.get('phone_code_hash')
-        temp_session_key = data.get('temp_session_key')  # New parameter
+        temp_session_key = data.get('temp_session_key')
         password = data.get('password')  # For 2FA
         
         account = Account.query.get_or_404(account_id)
@@ -586,7 +600,7 @@ def api_verify_code(account_id):
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
-# Chat listing route (like your Python script)
+# Chat listing route
 @app.route('/api/chats/list', methods=['POST'])
 def api_list_chats():
     """List chats for an account"""
@@ -625,58 +639,6 @@ def api_list_chats():
         logger.error(f"Error listing chats: {e}")
         return jsonify({'error': str(e)}), 500
 
-# Chat download route (like your Python script)
-@app.route('/api/chats/download', methods=['POST'])
-def api_download_chat():
-    """Download chat history"""
-    try:
-        if not TELEGRAM_AVAILABLE:
-            return jsonify({'error': 'Telegram client not available'}), 500
-            
-        data = request.json
-        account_id = data.get('account_id')
-        chat_id = data.get('chat_id')
-        chat_title = data.get('chat_title')
-        limit = data.get('limit', 1000)
-        
-        account = Account.query.get_or_404(account_id)
-        
-        if not account.is_authenticated or not account.session_string:
-            return jsonify({'error': 'Account not authenticated'}), 400
-        
-        service = TelegramService(
-            account.api_id,
-            account.api_hash,
-            account.phone_number,
-            account.session_string
-        )
-        
-        async def download_chat():
-            file_path, message_count = await service.download_chat_history(chat_id, chat_title, limit)
-            await service.disconnect()
-            return file_path, message_count
-        
-        file_path, message_count = run_async_safely(download_chat())
-        
-        # Save to database
-        chat_history = ChatHistory(
-            account_id=account_id,
-            chat_id=chat_id,
-            chat_title=chat_title,
-            file_path=file_path,
-            message_count=message_count
-        )
-        db.session.add(chat_history)
-        db.session.commit()
-        
-        # Return file for download
-        return send_file(file_path, as_attachment=True, 
-                        download_name=f"{chat_title.replace(' ', '_')}_history.txt")
-        
-    except Exception as e:
-        logger.error(f"Error downloading chat: {e}")
-        return jsonify({'error': str(e)}), 500
-
 @app.route('/api/forwarding_rules', methods=['GET', 'POST'])
 def api_forwarding_rules():
     try:
@@ -689,6 +651,7 @@ def api_forwarding_rules():
                 'source_chat_id': rule.source_chat_id,
                 'destination_chat_id': rule.destination_chat_id,
                 'keywords': json.loads(rule.keywords) if rule.keywords else [],
+                'delay_seconds': rule.delay_seconds,
                 'is_active': rule.is_active,
                 'created_at': rule.created_at.isoformat(),
                 'updated_at': rule.updated_at.isoformat()
@@ -702,6 +665,7 @@ def api_forwarding_rules():
                 source_chat_id=data['source_chat_id'],
                 destination_chat_id=data['destination_chat_id'],
                 keywords=json.dumps(data.get('keywords', [])),
+                delay_seconds=data.get('delay_seconds', 0),
                 is_active=data.get('is_active', False)
             )
             db.session.add(rule)
@@ -738,6 +702,7 @@ def api_forwarding_rule_detail(rule_id):
             rule.source_chat_id = data['source_chat_id']
             rule.destination_chat_id = data['destination_chat_id']
             rule.keywords = json.dumps(data.get('keywords', []))
+            rule.delay_seconds = data.get('delay_seconds', 0)
             rule.is_active = data.get('is_active', False)
             rule.updated_at = datetime.utcnow()
             db.session.commit()
@@ -784,7 +749,7 @@ def api_chat_histories():
 
 # Forwarding management functions
 def start_forwarding_rule(rule_id):
-    """Start a forwarding rule in a background thread"""
+    """Start a forwarding rule in a background thread with delay support"""
     try:
         rule = ForwardingRule.query.get(rule_id)
         if not rule or not rule.is_active:
@@ -811,13 +776,14 @@ def start_forwarding_rule(rule_id):
         # Parse keywords
         keywords = json.loads(rule.keywords) if rule.keywords else []
         
-        # Start forwarding in background thread
+        # Start forwarding in background thread with delay support
         def run_forwarder():
             try:
-                asyncio.run(service.forward_messages_to_channel(
+                asyncio.run(service.forward_messages_to_channel_with_delay(
                     rule.source_chat_id,
                     rule.destination_chat_id,
-                    keywords
+                    keywords,
+                    rule.delay_seconds
                 ))
             except Exception as e:
                 logger.error(f"Forwarding rule {rule_id} stopped with error: {e}")
@@ -833,10 +799,11 @@ def start_forwarding_rule(rule_id):
         active_forwarders[rule_id] = {
             'thread': thread,
             'service': service,
+            'delay_seconds': rule.delay_seconds,
             'started_at': datetime.utcnow()
         }
         
-        logger.info(f"Started forwarding rule {rule_id}")
+        logger.info(f"Started forwarding rule {rule_id} with {rule.delay_seconds}s delay")
         
     except Exception as e:
         logger.error(f"Failed to start forwarding rule {rule_id}: {e}")
@@ -889,6 +856,28 @@ def init_database():
     try:
         with app.app_context():
             db.create_all()
+            
+            # Add delay column if missing (for existing installations)
+            try:
+                # Check if column exists
+                inspector = db.inspect(db.engine)
+                columns = inspector.get_columns('forwarding_rule')
+                column_names = [col['name'] for col in columns]
+                
+                if 'delay_seconds' not in column_names:
+                    # Add the column using raw SQL
+                    if 'postgresql' in app.config['SQLALCHEMY_DATABASE_URI']:
+                        db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN delay_seconds INTEGER DEFAULT 0")
+                    else:
+                        db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN delay_seconds INTEGER DEFAULT 0")
+                    
+                    logger.info("Added delay_seconds column to forwarding_rule table")
+                else:
+                    logger.info("delay_seconds column already exists")
+                    
+            except Exception as e:
+                logger.error(f"Error adding delay column: {e}")
+            
             logger.info("Database tables created successfully")
     except Exception as e:
         logger.error(f"Database creation error: {e}")
