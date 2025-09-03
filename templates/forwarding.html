@@ -4,7 +4,7 @@
 <div class="flex justify-between items-center mb-8">
     <div>
         <h1 class="text-3xl font-bold text-white mb-2">Forwarding Rules</h1>
-        <p class="text-purple-300">Create and manage message forwarding automation with custom delays</p>
+        <p class="text-purple-300">Create and manage message forwarding automation with custom delays and timers</p>
     </div>
     
     <button id="create-rule-btn" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
@@ -28,8 +28,8 @@
 <!-- Create/Edit Rule Modal -->
 <div id="rule-modal" class="fixed inset-0 z-50 hidden">
     <div class="fixed inset-0 bg-black/50"></div>
-    <div class="fixed inset-0 flex items-center justify-center p-4">
-        <div class="glass rounded-lg w-full max-w-lg p-6">
+    <div class="fixed inset-0 flex items-center justify-center p-4 overflow-y-auto">
+        <div class="glass rounded-lg w-full max-w-2xl p-6 my-8">
             <div class="flex justify-between items-center mb-4">
                 <h3 id="rule-modal-title" class="text-xl font-semibold text-white">Create New Forwarding Rule</h3>
                 <button id="close-rule-modal" class="text-purple-300 hover:text-white">
@@ -37,29 +37,33 @@
                 </button>
             </div>
             
-            <form id="rule-form" class="space-y-4">
+            <form id="rule-form" class="space-y-6">
                 <input type="hidden" id="rule-id">
                 
-                <div>
-                    <label for="rule-name" class="block text-purple-200 text-sm font-medium mb-2">
-                        Rule Name
-                    </label>
-                    <input type="text" id="rule-name" required
-                           class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white placeholder-purple-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                           placeholder="My Forwarding Rule">
+                <!-- Basic Information -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label for="rule-name" class="block text-purple-200 text-sm font-medium mb-2">
+                            Rule Name
+                        </label>
+                        <input type="text" id="rule-name" required
+                               class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white placeholder-purple-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                               placeholder="My Forwarding Rule">
+                    </div>
+                    
+                    <div>
+                        <label for="rule-account" class="block text-purple-200 text-sm font-medium mb-2">
+                            Account
+                        </label>
+                        <select id="rule-account" required
+                                class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500">
+                            <option value="">Select an account</option>
+                        </select>
+                    </div>
                 </div>
                 
-                <div>
-                    <label for="rule-account" class="block text-purple-200 text-sm font-medium mb-2">
-                        Account
-                    </label>
-                    <select id="rule-account" required
-                            class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500">
-                        <option value="">Select an account</option>
-                    </select>
-                </div>
-                
-                <div class="grid grid-cols-2 gap-4">
+                <!-- Chat IDs -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label for="source-chat-id" class="block text-purple-200 text-sm font-medium mb-2">
                             Source Chat ID
@@ -79,6 +83,7 @@
                     </div>
                 </div>
                 
+                <!-- Keywords -->
                 <div>
                     <label for="keywords" class="block text-purple-200 text-sm font-medium mb-2">
                         Keywords (optional)
@@ -91,7 +96,7 @@
                     </p>
                 </div>
                 
-                <!-- NEW: Delay Settings -->
+                <!-- Delay Settings -->
                 <div>
                     <label for="delay-seconds" class="block text-purple-200 text-sm font-medium mb-2">
                         <i class="fas fa-clock mr-1"></i>Forward Delay
@@ -119,12 +124,96 @@
                     </div>
                 </div>
                 
+                <!-- Timer Settings -->
+                <div class="border border-purple-700/30 rounded-lg p-4 bg-purple-900/20">
+                    <div class="flex items-center mb-4">
+                        <input type="checkbox" id="use-timer" class="w-4 h-4 text-purple-600 border border-purple-700/50 rounded focus:ring-purple-500 mr-3">
+                        <label for="use-timer" class="text-purple-200 font-medium">
+                            <i class="fas fa-alarm-clock mr-2"></i>Enable Time-Based Control
+                        </label>
+                    </div>
+                    
+                    <div id="timer-settings" class="space-y-4 hidden">
+                        <p class="text-xs text-purple-400">
+                            Configure specific hours when forwarding should be active. Perfect for business hours or avoiding spam during sleep time.
+                        </p>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                                <label for="start-time" class="block text-purple-200 text-sm font-medium mb-2">
+                                    Start Time
+                                </label>
+                                <input type="time" id="start-time" value="20:00"
+                                       class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500">
+                                <p class="text-xs text-purple-400 mt-1">When to start forwarding</p>
+                            </div>
+                            
+                            <div>
+                                <label for="end-time" class="block text-purple-200 text-sm font-medium mb-2">
+                                    End Time
+                                </label>
+                                <input type="time" id="end-time" value="01:00"
+                                       class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500">
+                                <p class="text-xs text-purple-400 mt-1">When to stop forwarding</p>
+                            </div>
+                            
+                            <div>
+                                <label for="timezone" class="block text-purple-200 text-sm font-medium mb-2">
+                                    Timezone
+                                </label>
+                                <select id="timezone"
+                                        class="w-full px-3 py-2 bg-purple-900/50 border border-purple-700/50 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500">
+                                    <option value="America/New_York">Eastern Time (ET)</option>
+                                    <option value="America/Chicago">Central Time (CT)</option>
+                                    <option value="America/Denver">Mountain Time (MT)</option>
+                                    <option value="America/Los_Angeles">Pacific Time (PT)</option>
+                                    <option value="America/Phoenix">Arizona Time (MST)</option>
+                                    <option value="America/Anchorage">Alaska Time (AKT)</option>
+                                    <option value="Pacific/Honolulu">Hawaii Time (HST)</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <!-- Timer Presets -->
+                        <div>
+                            <label class="block text-purple-200 text-sm font-medium mb-2">Quick Presets</label>
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                <button type="button" onclick="setTimerPreset('20:00', '01:00')" 
+                                        class="px-3 py-2 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-sm transition-colors">
+                                    8PM - 1AM
+                                </button>
+                                <button type="button" onclick="setTimerPreset('05:00', '20:00')" 
+                                        class="px-3 py-2 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-sm transition-colors">
+                                    5AM - 8PM
+                                </button>
+                                <button type="button" onclick="setTimerPreset('09:00', '17:00')" 
+                                        class="px-3 py-2 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-sm transition-colors">
+                                    9AM - 5PM
+                                </button>
+                                <button type="button" onclick="setTimerPreset('22:00', '06:00')" 
+                                        class="px-3 py-2 bg-purple-800/50 hover:bg-purple-700/50 text-purple-200 rounded text-sm transition-colors">
+                                    10PM - 6AM
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <!-- Timer Preview -->
+                        <div id="timer-preview" class="bg-purple-800/20 rounded p-3">
+                            <div class="text-sm text-purple-300">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                <span id="timer-description">Timer preview will appear here</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Activation -->
                 <div class="flex items-center space-x-2">
                     <input type="checkbox" id="is-active" class="w-4 h-4 text-purple-600 border border-purple-700/50 rounded focus:ring-purple-500">
                     <label for="is-active" class="text-purple-200 text-sm">Start immediately</label>
                 </div>
                 
-                <div class="flex justify-end space-x-2 pt-4">
+                <div class="flex justify-end space-x-2 pt-4 border-t border-purple-700/30">
                     <button type="button" id="cancel-rule-btn" class="px-4 py-2 text-purple-300 hover:text-white transition-colors">
                         Cancel
                     </button>
@@ -150,6 +239,67 @@
     const ruleForm = document.getElementById('rule-form');
     const createRuleBtn = document.getElementById('create-rule-btn');
     const noAccountsWarning = document.getElementById('no-accounts-warning');
+    const useTimerCheckbox = document.getElementById('use-timer');
+    const timerSettings = document.getElementById('timer-settings');
+    const timerPreview = document.getElementById('timer-preview');
+
+    // Timer functionality
+    useTimerCheckbox.addEventListener('change', function() {
+        if (this.checked) {
+            timerSettings.classList.remove('hidden');
+            updateTimerPreview();
+        } else {
+            timerSettings.classList.add('hidden');
+        }
+    });
+
+    // Update timer preview when times change
+    document.getElementById('start-time').addEventListener('change', updateTimerPreview);
+    document.getElementById('end-time').addEventListener('change', updateTimerPreview);
+    document.getElementById('timezone').addEventListener('change', updateTimerPreview);
+
+    function updateTimerPreview() {
+        if (!useTimerCheckbox.checked) return;
+        
+        const startTime = document.getElementById('start-time').value;
+        const endTime = document.getElementById('end-time').value;
+        const timezone = document.getElementById('timezone').value;
+        
+        if (startTime && endTime) {
+            const description = generateTimerDescription(startTime, endTime, timezone);
+            document.getElementById('timer-description').textContent = description;
+        }
+    }
+
+    function generateTimerDescription(startTime, endTime, timezone) {
+        const start = formatTime12Hour(startTime);
+        const end = formatTime12Hour(endTime);
+        const tzName = timezone.split('/')[1].replace('_', ' ');
+        
+        // Check if it's an overnight schedule
+        const startHour = parseInt(startTime.split(':')[0]);
+        const endHour = parseInt(endTime.split(':')[0]);
+        
+        if (endHour <= startHour) {
+            return `Active overnight: ${start} to ${end} next day (${tzName})`;
+        } else {
+            return `Active daily: ${start} to ${end} (${tzName})`;
+        }
+    }
+
+    function formatTime12Hour(time24) {
+        const [hours, minutes] = time24.split(':');
+        const hour = parseInt(hours);
+        const ampm = hour >= 12 ? 'PM' : 'AM';
+        const hour12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+        return `${hour12}:${minutes} ${ampm}`;
+    }
+
+    function setTimerPreset(startTime, endTime) {
+        document.getElementById('start-time').value = startTime;
+        document.getElementById('end-time').value = endTime;
+        updateTimerPreview();
+    }
 
     // Set delay function for quick buttons
     function setDelay(seconds) {
@@ -221,6 +371,12 @@
         } else {
             rulesContainer.innerHTML = rules.map(rule => {
                 const account = accounts.find(acc => acc.id === rule.account_id);
+                const timerInfo = rule.use_timer ? 
+                    `<div class="flex items-center space-x-2 text-sm">
+                        <i class="fas fa-alarm-clock text-purple-400"></i>
+                        <span class="text-purple-300">Timer: ${formatTime12Hour(rule.start_time)} - ${formatTime12Hour(rule.end_time)}</span>
+                    </div>` : '';
+                
                 return `
                     <div class="glass rounded-lg hover:bg-purple-900/40 transition-colors">
                         <div class="p-6">
@@ -228,6 +384,7 @@
                                 <div class="flex items-center">
                                     <i class="fas fa-bolt text-purple-400 mr-2"></i>
                                     <h3 class="text-white font-medium">${rule.name}</h3>
+                                    ${rule.use_timer ? '<i class="fas fa-alarm-clock text-yellow-400 ml-2" title="Timer Enabled"></i>' : ''}
                                 </div>
                                 <div class="flex items-center space-x-2">
                                     <i class="fas ${rule.is_active ? 'fa-play text-green-400' : 'fa-pause text-gray-400'}"></i>
@@ -255,6 +412,8 @@
                                     <i class="fas fa-clock text-purple-400"></i>
                                     <span class="text-purple-300">Delay: ${formatDelay(rule.delay_seconds)}</span>
                                 </div>
+                                
+                                ${timerInfo}
                                 
                                 ${rule.keywords.length > 0 ? `
                                     <div class="flex items-start space-x-2 text-sm">
@@ -308,11 +467,25 @@
             document.getElementById('keywords').value = rule.keywords.join(', ');
             document.getElementById('delay-seconds').value = rule.delay_seconds || 0;
             document.getElementById('is-active').checked = rule.is_active;
+            
+            // Timer settings
+            document.getElementById('use-timer').checked = rule.use_timer || false;
+            if (rule.use_timer) {
+                timerSettings.classList.remove('hidden');
+                document.getElementById('start-time').value = rule.start_time || '20:00';
+                document.getElementById('end-time').value = rule.end_time || '01:00';
+                document.getElementById('timezone').value = rule.timezone || 'America/New_York';
+                updateTimerPreview();
+            }
         } else {
             document.getElementById('rule-modal-title').textContent = 'Create New Forwarding Rule';
             document.getElementById('rule-submit-text').textContent = 'Create Rule';
             ruleForm.reset();
             document.getElementById('delay-seconds').value = 0;
+            document.getElementById('start-time').value = '20:00';
+            document.getElementById('end-time').value = '01:00';
+            document.getElementById('timezone').value = 'America/New_York';
+            timerSettings.classList.add('hidden');
         }
         
         ruleModal.classList.remove('hidden');
@@ -323,6 +496,7 @@
         ruleModal.classList.add('hidden');
         ruleForm.reset();
         editingRuleId = null;
+        timerSettings.classList.add('hidden');
     }
 
     // Edit rule
@@ -379,6 +553,7 @@
             .filter(k => k);
         
         const delaySeconds = parseInt(document.getElementById('delay-seconds').value) || 0;
+        const useTimer = document.getElementById('use-timer').checked;
         
         // Validate delay
         if (delaySeconds < 0 || delaySeconds > 3600) {
@@ -393,7 +568,11 @@
             destination_chat_id: parseInt(document.getElementById('destination-chat-id').value),
             keywords: keywords,
             delay_seconds: delaySeconds,
-            is_active: document.getElementById('is-active').checked
+            is_active: document.getElementById('is-active').checked,
+            use_timer: useTimer,
+            start_time: useTimer ? document.getElementById('start-time').value : null,
+            end_time: useTimer ? document.getElementById('end-time').value : null,
+            timezone: useTimer ? document.getElementById('timezone').value : 'America/New_York'
         };
         
         try {
