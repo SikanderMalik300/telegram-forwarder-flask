@@ -69,9 +69,9 @@ class ForwardingRule(db.Model):
     
     # Timer fields
     use_timer = db.Column(db.Boolean, default=False)
-    start_time = db.Column(db.String(5))  # Format: "HH:MM" (24-hour)
-    end_time = db.Column(db.String(5))    # Format: "HH:MM" (24-hour)
-    timezone = db.Column(db.String(50), default='America/New_York')  # US Eastern by default
+    start_time = db.Column(db.Text)  # Format: "HH:MM" (24-hour)
+    end_time = db.Column(db.Text)    # Format: "HH:MM" (24-hour)
+    timezone = db.Column(db.Text, default='America/New_York')  # US Eastern by default
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -137,32 +137,6 @@ def is_within_active_hours(start_time_str, end_time_str, timezone_str='America/N
     except Exception as e:
         logger.error(f"Error checking active hours: {e}")
         return True  # Default to active if there's an error
-
-def get_next_active_period(start_time_str, end_time_str, timezone_str='America/New_York'):
-    """Get the next time when forwarding should become active."""
-    try:
-        tz = pytz.timezone(timezone_str)
-        current_dt = datetime.now(tz)
-        
-        if is_within_active_hours(start_time_str, end_time_str, timezone_str):
-            return None  # Currently active
-        
-        # Parse start time
-        start_hour, start_minute = map(int, start_time_str.split(':'))
-        
-        # Calculate next start time
-        next_start = current_dt.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-        
-        # If start time has passed today, move to tomorrow
-        if next_start <= current_dt:
-            from datetime import timedelta
-            next_start = next_start + timedelta(days=1)
-        
-        return next_start
-        
-    except Exception as e:
-        logger.error(f"Error calculating next active period: {e}")
-        return None
 
 class TelegramService:
     def __init__(self, api_id, api_hash, phone_number, session_string="", temp_session_key=None):
@@ -327,8 +301,8 @@ class TelegramService:
             logger.error(f"Error listing chats: {e}")
             raise
 
-    async def forward_messages_to_channel_with_delay_and_timer(self, source_chat_id, destination_channel_id, keywords, delay_seconds=0, use_timer=False, start_time=None, end_time=None, timezone_str='America/New_York'):
-        """Forward messages from source to destination with configurable delay and time restrictions"""
+    async def forward_messages_with_timer(self, source_chat_id, destination_channel_id, keywords, delay_seconds=0, use_timer=False, start_time=None, end_time=None, timezone_str='America/New_York'):
+        """Simple forwarding with timer - only forward during specified hours"""
         try:
             if not self.client:
                 self._create_client()
@@ -349,30 +323,28 @@ class TelegramService:
                 logger.warning(f"Could not get last message ID for {source_chat_id}: {e}")
                 last_message_id = 0
             
-            logger.info(f"Starting message forwarding from {source_chat_id} to {destination_channel_id} with {delay_seconds}s delay")
+            logger.info(f"Starting message forwarding from {source_chat_id} to {destination_channel_id}")
             if use_timer:
-                logger.info(f"Timer active: {start_time} to {end_time} ({timezone_str})")
+                logger.info(f"Timer enabled: {start_time} to {end_time} ({timezone_str})")
             
             # Queue to store messages for delayed sending
             message_queue = []
             
             while True:
                 try:
-                    # Check if we should be active (if timer is enabled)
-                    should_be_active = True
+                    # Simple timer check - skip everything if outside active hours
                     if use_timer and start_time and end_time:
-                        should_be_active = is_within_active_hours(start_time, end_time, timezone_str)
+                        if not is_within_active_hours(start_time, end_time, timezone_str):
+                            await asyncio.sleep(30)  # Short sleep and skip processing
+                            continue
                     
-                    if not should_be_active:
-                        # Sleep longer when inactive
-                        next_active = get_next_active_period(start_time, end_time, timezone_str)
-                        if next_active:
-                            sleep_seconds = min(300, (next_active - datetime.now(pytz.timezone(timezone_str))).total_seconds())
-                            logger.info(f"Forwarding inactive. Next active period: {next_active}. Sleeping for {sleep_seconds}s")
-                            await asyncio.sleep(max(30, sleep_seconds))  # Sleep at least 30 seconds
-                        else:
-                            await asyncio.sleep(30)  # Fallback sleep
-                        continue
+                    # Check connection and reconnect if needed
+                    if not self.client.is_connected():
+                        logger.info("Client disconnected, attempting to reconnect...")
+                        await self.client.connect()
+                        if not await self.client.is_user_authorized():
+                            logger.error("Client not authorized after reconnection")
+                            break
                     
                     # Get new messages since the last checked message
                     messages = await self.client.get_messages(source_chat_id, min_id=last_message_id, limit=None)
@@ -401,12 +373,9 @@ class TelegramService:
                                     })
                                     logger.info(f"Message queued for delayed sending in {delay_seconds}s")
                                 else:
-                                    # Check timer again before sending immediately
-                                    if not use_timer or is_within_active_hours(start_time, end_time, timezone_str):
-                                        await self.client.send_message(destination_channel_id, message.text)
-                                        logger.info("Message forwarded immediately")
-                                    else:
-                                        logger.info("Message skipped - outside active hours")
+                                    # Send immediately (we already checked timer above)
+                                    await self.client.send_message(destination_channel_id, message.text)
+                                    logger.info("Message forwarded immediately")
                             
                             # Update the last message ID
                             last_message_id = max(last_message_id, message.id)
@@ -415,19 +384,14 @@ class TelegramService:
                             logger.error(f"Error processing message {message.id}: {msg_error}")
                             continue
                     
-                    # Process delayed messages (only during active hours if timer is enabled)
+                    # Process delayed messages
                     current_time = datetime.utcnow().timestamp()
                     messages_to_send = []
                     remaining_messages = []
                     
                     for queued_msg in message_queue:
                         if current_time >= queued_msg['send_time']:
-                            # Check timer before sending delayed message
-                            if not use_timer or is_within_active_hours(start_time, end_time, timezone_str):
-                                messages_to_send.append(queued_msg)
-                            else:
-                                # Keep in queue if outside active hours
-                                remaining_messages.append(queued_msg)
+                            messages_to_send.append(queued_msg)
                         else:
                             remaining_messages.append(queued_msg)
                     
@@ -442,11 +406,8 @@ class TelegramService:
                     # Update message queue
                     message_queue = remaining_messages
                     
-                    # Adjust sleep time based on activity
-                    if should_be_active:
-                        await asyncio.sleep(2)  # Check every 2 seconds when active
-                    else:
-                        await asyncio.sleep(30)  # Longer sleep when inactive
+                    # Check every 2 seconds for new messages
+                    await asyncio.sleep(2)
                     
                 except Exception as loop_error:
                     logger.error(f"Error in forwarding loop: {loop_error}")
@@ -454,7 +415,7 @@ class TelegramService:
                     continue
                     
         except Exception as e:
-            logger.error(f"Error in message forwarding with delay and timer: {e}")
+            logger.error(f"Error in message forwarding: {e}")
             raise
 
     def get_session_string(self):
@@ -853,77 +814,9 @@ def api_chat_histories():
         logger.error(f"Error in api_chat_histories: {e}")
         return jsonify({'error': str(e)}), 500
 
-# Timer-specific API endpoints
-@app.route('/api/timezone/<timezone_str>/current_time', methods=['GET'])
-def get_current_time(timezone_str):
-    """Get current time for a specific timezone"""
-    try:
-        tz = pytz.timezone(timezone_str)
-        current_time = datetime.now(tz)
-        
-        return jsonify({
-            'success': True,
-            'timezone': timezone_str,
-            'current_time': current_time.strftime('%H:%M'),
-            'current_datetime': current_time.isoformat(),
-            'formatted_time': current_time.strftime('%I:%M %p'),
-            'date': current_time.strftime('%Y-%m-%d')
-        })
-    except Exception as e:
-        return jsonify({'error': f'Invalid timezone: {str(e)}'}), 400
-
-@app.route('/api/validate_timer', methods=['POST'])
-def validate_timer():
-    """Validate timer settings and provide feedback"""
-    try:
-        data = request.json
-        start_time = data.get('start_time')
-        end_time = data.get('end_time')
-        timezone_str = data.get('timezone', 'America/New_York')
-        
-        if not start_time or not end_time:
-            return jsonify({'error': 'Start time and end time are required'}), 400
-        
-        # Validate time format
-        try:
-            start_hour, start_minute = map(int, start_time.split(':'))
-            end_hour, end_minute = map(int, end_time.split(':'))
-        except ValueError:
-            return jsonify({'error': 'Invalid time format. Use HH:MM'}), 400
-        
-        # Validate time ranges
-        if not (0 <= start_hour <= 23 and 0 <= start_minute <= 59):
-            return jsonify({'error': 'Invalid start time'}), 400
-        if not (0 <= end_hour <= 23 and 0 <= end_minute <= 59):
-            return jsonify({'error': 'Invalid end time'}), 400
-        
-        # Validate timezone
-        try:
-            tz = pytz.timezone(timezone_str)
-        except pytz.exceptions.UnknownTimeZoneError:
-            return jsonify({'error': 'Invalid timezone'}), 400
-        
-        # Check if currently active
-        is_active = is_within_active_hours(start_time, end_time, timezone_str)
-        
-        # Calculate next activation time
-        next_active = get_next_active_period(start_time, end_time, timezone_str)
-        
-        return jsonify({
-            'success': True,
-            'is_currently_active': is_active,
-            'next_active_time': next_active.isoformat() if next_active else None,
-            'is_overnight_schedule': end_time <= start_time,
-            'timezone_name': timezone_str.split('/')[-1].replace('_', ' ')
-        })
-        
-    except Exception as e:
-        logger.error(f"Error validating timer: {e}")
-        return jsonify({'error': str(e)}), 500
-
 # Forwarding management functions
 def start_forwarding_rule(rule_id):
-    """Start a forwarding rule in a background thread with delay and timer support"""
+    """Start a forwarding rule in a background thread with simple timer support"""
     try:
         rule = ForwardingRule.query.get(rule_id)
         if not rule or not rule.is_active:
@@ -950,10 +843,10 @@ def start_forwarding_rule(rule_id):
         # Parse keywords
         keywords = json.loads(rule.keywords) if rule.keywords else []
         
-        # Start forwarding in background thread with timer support
+        # Start forwarding in background thread
         def run_forwarder():
             try:
-                asyncio.run(service.forward_messages_to_channel_with_delay_and_timer(
+                asyncio.run(service.forward_messages_with_timer(
                     rule.source_chat_id,
                     rule.destination_chat_id,
                     keywords,
@@ -1034,62 +927,11 @@ def start_active_forwarding_rules():
     except Exception as e:
         logger.error(f"Error starting active forwarding rules: {e}")
 
-# Database initialization with timer columns
-def add_timer_columns():
-    """Add timer columns to existing ForwardingRule table"""
-    try:
-        with app.app_context():
-            # Check if columns exist
-            inspector = db.inspect(db.engine)
-            columns = inspector.get_columns('forwarding_rule')
-            column_names = [col['name'] for col in columns]
-            
-            # Add missing timer columns
-            if 'use_timer' not in column_names:
-                if 'postgresql' in app.config['SQLALCHEMY_DATABASE_URI']:
-                    db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN use_timer BOOLEAN DEFAULT FALSE")
-                    db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN start_time VARCHAR(5)")
-                    db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN end_time VARCHAR(5)")
-                    db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN timezone VARCHAR(50) DEFAULT 'America/New_York'")
-                else:
-                    db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN use_timer BOOLEAN DEFAULT 0")
-                    db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN start_time VARCHAR(5)")
-                    db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN end_time VARCHAR(5)")
-                    db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN timezone VARCHAR(50) DEFAULT 'America/New_York'")
-                
-                logger.info("Added timer columns to forwarding_rule table")
-            else:
-                logger.info("Timer columns already exist")
-                
-    except Exception as e:
-        logger.error(f"Error adding timer columns: {e}")
-
 # Initialize database
 def init_database():
     try:
         with app.app_context():
             db.create_all()
-            
-            # Add delay column if missing (for existing installations)
-            try:
-                inspector = db.inspect(db.engine)
-                columns = inspector.get_columns('forwarding_rule')
-                column_names = [col['name'] for col in columns]
-                
-                if 'delay_seconds' not in column_names:
-                    if 'postgresql' in app.config['SQLALCHEMY_DATABASE_URI']:
-                        db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN delay_seconds INTEGER DEFAULT 0")
-                    else:
-                        db.engine.execute("ALTER TABLE forwarding_rule ADD COLUMN delay_seconds INTEGER DEFAULT 0")
-                    
-                    logger.info("Added delay_seconds column to forwarding_rule table")
-                
-                # Add timer columns
-                add_timer_columns()
-                    
-            except Exception as e:
-                logger.error(f"Error adding columns: {e}")
-            
             logger.info("Database tables created successfully")
     except Exception as e:
         logger.error(f"Database creation error: {e}")
