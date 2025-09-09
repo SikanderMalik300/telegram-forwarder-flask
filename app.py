@@ -10,6 +10,7 @@ import time as time_module
 import logging
 import traceback
 import pytz
+from collections import defaultdict
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -94,6 +95,7 @@ try:
     from telethon.sync import TelegramClient
     from telethon import errors
     from telethon.sessions import StringSession
+    from telethon.errors import FloodWaitError, SlowModeWaitError, AuthKeyError
     TELEGRAM_AVAILABLE = True
     logger.info("Telegram libraries imported successfully")
 except ImportError as e:
@@ -106,6 +108,50 @@ active_forwarders = {}
 
 # Global storage for temporary sessions during authentication
 temp_auth_sessions = {}
+
+# Global stop flag for emergency stopping
+stop_all_flag = threading.Event()
+
+# Rate limiting class
+class RateLimitManager:
+    def __init__(self):
+        self.last_message_times = defaultdict(float)
+        self.message_counts = defaultdict(list)
+        self.min_delay = 2.0  # Minimum 2 seconds between messages
+        self.max_messages_per_minute = 15  # Conservative limit
+        
+    def can_send_message(self, chat_id):
+        """Check if we can send a message to this chat without rate limiting"""
+        current_time = time_module.time()
+        chat_key = str(chat_id)
+        
+        # Clean old message timestamps
+        self.message_counts[chat_key] = [
+            t for t in self.message_counts[chat_key] 
+            if current_time - t < 60
+        ]
+        
+        # Check message count limit
+        if len(self.message_counts[chat_key]) >= self.max_messages_per_minute:
+            return False, 60 - (current_time - self.message_counts[chat_key][0])
+        
+        # Check minimum delay
+        if chat_key in self.last_message_times:
+            time_since_last = current_time - self.last_message_times[chat_key]
+            if time_since_last < self.min_delay:
+                return False, self.min_delay - time_since_last
+        
+        return True, 0
+    
+    def record_message_sent(self, chat_id):
+        """Record that a message was sent"""
+        current_time = time_module.time()
+        chat_key = str(chat_id)
+        self.last_message_times[chat_key] = current_time
+        self.message_counts[chat_key].append(current_time)
+
+# Global rate limiter
+rate_limiter = RateLimitManager()
 
 # Timer utility functions
 def is_within_active_hours(start_time_str, end_time_str, timezone_str='America/New_York'):
@@ -301,8 +347,63 @@ class TelegramService:
             logger.error(f"Error listing chats: {e}")
             raise
 
-    async def forward_messages_with_timer(self, source_chat_id, destination_channel_id, keywords, delay_seconds=0, use_timer=False, start_time=None, end_time=None, timezone_str='America/New_York'):
-        """Simple forwarding with timer - only forward during specified hours"""
+    async def send_message_with_rate_limiting(self, destination_chat_id, message_text):
+        """Send message with proper rate limiting and error handling"""
+        try:
+            # Check rate limiting
+            can_send, wait_time = rate_limiter.can_send_message(destination_chat_id)
+            if not can_send:
+                logger.info(f"Rate limiting: waiting {wait_time:.1f}s for chat {destination_chat_id}")
+                await asyncio.sleep(wait_time)
+            
+            # Attempt to send with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    await self.client.send_message(destination_chat_id, message_text)
+                    rate_limiter.record_message_sent(destination_chat_id)
+                    logger.info("Message forwarded successfully")
+                    return True
+                    
+                except FloodWaitError as e:
+                    wait_time = e.seconds
+                    logger.warning(f"Flood wait error: waiting {wait_time} seconds")
+                    
+                    if wait_time > 300:  # More than 5 minutes
+                        logger.error(f"Flood wait too long ({wait_time}s), aborting")
+                        raise Exception(f"Flood wait too long: {wait_time} seconds")
+                    
+                    # Wait with stop flag checking
+                    for _ in range(wait_time):
+                        if stop_all_flag.is_set():
+                            return False
+                        await asyncio.sleep(1)
+                    
+                except SlowModeWaitError as e:
+                    wait_time = e.seconds
+                    logger.warning(f"Slow mode wait: {wait_time} seconds")
+                    await asyncio.sleep(wait_time)
+                    
+                except AuthKeyError as e:
+                    logger.error(f"Auth key error: {e}")
+                    raise Exception("Authentication failed. Please re-authenticate your account.")
+                    
+                except Exception as e:
+                    logger.error(f"Error sending message (attempt {attempt + 1}): {e}")
+                    if attempt == max_retries - 1:
+                        raise
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}")
+            raise
+
+    async def forward_messages_improved(self, source_chat_id, destination_channel_id, keywords, 
+                                      delay_seconds=0, use_timer=False, start_time=None, 
+                                      end_time=None, timezone_str='America/New_York', rule_id=None):
+        """Improved message forwarding with better error handling"""
         try:
             if not self.client:
                 self._create_client()
@@ -323,19 +424,21 @@ class TelegramService:
                 logger.warning(f"Could not get last message ID for {source_chat_id}: {e}")
                 last_message_id = 0
             
-            logger.info(f"Starting message forwarding from {source_chat_id} to {destination_channel_id}")
+            logger.info(f"Starting improved forwarding from {source_chat_id} to {destination_channel_id} (Rule {rule_id})")
             if use_timer:
                 logger.info(f"Timer enabled: {start_time} to {end_time} ({timezone_str})")
             
             # Queue to store messages for delayed sending
             message_queue = []
+            consecutive_errors = 0
+            max_consecutive_errors = 10
             
-            while True:
+            while not stop_all_flag.is_set():
                 try:
                     # Simple timer check - skip everything if outside active hours
                     if use_timer and start_time and end_time:
                         if not is_within_active_hours(start_time, end_time, timezone_str):
-                            await asyncio.sleep(30)  # Short sleep and skip processing
+                            await asyncio.sleep(30)  # Check every 30 seconds
                             continue
                     
                     # Check connection and reconnect if needed
@@ -346,26 +449,50 @@ class TelegramService:
                             logger.error("Client not authorized after reconnection")
                             break
                     
-                    # Get new messages since the last checked message
-                    messages = await self.client.get_messages(source_chat_id, min_id=last_message_id, limit=None)
+                    # Get new messages with flood control
+                    try:
+                        messages = await self.client.get_messages(
+                            source_chat_id, 
+                            min_id=last_message_id, 
+                            limit=5  # Reduced limit to avoid flooding
+                        )
+                    except FloodWaitError as e:
+                        logger.warning(f"Flood wait when getting messages: {e.seconds}s")
+                        for _ in range(min(e.seconds, 300)):  # Cap at 5 minutes
+                            if stop_all_flag.is_set():
+                                return
+                            await asyncio.sleep(1)
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error getting messages: {e}")
+                        consecutive_errors += 1
+                        if consecutive_errors >= max_consecutive_errors:
+                            logger.error("Too many consecutive errors, stopping forwarder")
+                            break
+                        await asyncio.sleep(5)
+                        continue
                     
                     for message in reversed(messages):
+                        if stop_all_flag.is_set():
+                            return
+                            
                         try:
                             # Check if the message text includes any of the keywords
                             should_forward = False
                             
                             if keywords:
                                 if message.text and any(keyword.lower() in message.text.lower() for keyword in keywords):
-                                    logger.info(f"Message contains a keyword: {message.text[:50]}...")
+                                    logger.info(f"Message contains keyword: {message.text[:50]}...")
                                     should_forward = True
                             else:
                                 # Forward all messages if no keywords specified
-                                should_forward = True
+                                if message.text:
+                                    should_forward = True
                             
                             if should_forward and message.text:
                                 if delay_seconds > 0:
                                     # Add to queue with timestamp for delayed sending
-                                    send_time = datetime.utcnow().timestamp() + delay_seconds
+                                    send_time = time_module.time() + delay_seconds
                                     message_queue.append({
                                         'text': message.text,
                                         'send_time': send_time,
@@ -373,19 +500,19 @@ class TelegramService:
                                     })
                                     logger.info(f"Message queued for delayed sending in {delay_seconds}s")
                                 else:
-                                    # Send immediately (we already checked timer above)
-                                    await self.client.send_message(destination_channel_id, message.text)
-                                    logger.info("Message forwarded immediately")
+                                    # Send immediately with rate limiting
+                                    await self.send_message_with_rate_limiting(destination_channel_id, message.text)
                             
                             # Update the last message ID
                             last_message_id = max(last_message_id, message.id)
+                            consecutive_errors = 0  # Reset error counter on success
                             
                         except Exception as msg_error:
                             logger.error(f"Error processing message {message.id}: {msg_error}")
                             continue
                     
                     # Process delayed messages
-                    current_time = datetime.utcnow().timestamp()
+                    current_time = time_module.time()
                     messages_to_send = []
                     remaining_messages = []
                     
@@ -397,8 +524,10 @@ class TelegramService:
                     
                     # Send delayed messages
                     for msg_to_send in messages_to_send:
+                        if stop_all_flag.is_set():
+                            return
                         try:
-                            await self.client.send_message(destination_channel_id, msg_to_send['text'])
+                            await self.send_message_with_rate_limiting(destination_channel_id, msg_to_send['text'])
                             logger.info(f"Delayed message sent after {delay_seconds}s delay")
                         except Exception as send_error:
                             logger.error(f"Error sending delayed message: {send_error}")
@@ -406,17 +535,32 @@ class TelegramService:
                     # Update message queue
                     message_queue = remaining_messages
                     
-                    # Check every 2 seconds for new messages
-                    await asyncio.sleep(2)
+                    # Adaptive sleep - more frequent checks when there are messages
+                    sleep_time = 3 if len(messages) > 0 else 10
+                    for _ in range(sleep_time):
+                        if stop_all_flag.is_set():
+                            return
+                        await asyncio.sleep(1)
                     
                 except Exception as loop_error:
                     logger.error(f"Error in forwarding loop: {loop_error}")
-                    await asyncio.sleep(5)  # Wait longer on error
-                    continue
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.error("Too many consecutive errors, stopping forwarder")
+                        break
+                    
+                    # Exponential backoff with stop flag checking
+                    sleep_time = min(5 * consecutive_errors, 30)
+                    for _ in range(sleep_time):
+                        if stop_all_flag.is_set():
+                            return
+                        await asyncio.sleep(1)
                     
         except Exception as e:
-            logger.error(f"Error in message forwarding: {e}")
+            logger.error(f"Fatal error in message forwarding: {e}")
             raise
+        finally:
+            logger.info(f"Forwarding ended for rule {rule_id}")
 
     def get_session_string(self):
         return self.session.save() if self.session else ''
@@ -487,6 +631,101 @@ def forwarding():
 def settings():
     return render_template('settings.html')
 
+# Emergency stop route
+@app.route('/api/emergency_stop', methods=['POST'])
+def emergency_stop():
+    """Emergency stop all forwarding operations"""
+    try:
+        global active_forwarders, active_connections, stop_all_flag
+        
+        logger.info(f"Emergency stop requested. Active forwarders: {list(active_forwarders.keys())}")
+        
+        # Set global stop flag
+        stop_all_flag.set()
+        
+        # Wait a moment for threads to see the flag
+        time_module.sleep(2)
+        
+        # Force stop all forwarders
+        rule_ids = list(active_forwarders.keys())
+        for rule_id in rule_ids:
+            try:
+                stop_forwarding_rule(rule_id)
+                logger.info(f"Stopped forwarding rule {rule_id}")
+            except Exception as e:
+                logger.error(f"Error stopping rule {rule_id}: {e}")
+        
+        # Clear all connections
+        connection_keys = list(active_connections.keys())
+        for key in connection_keys:
+            try:
+                if key in active_connections:
+                    del active_connections[key]
+                logger.info(f"Cleared connection {key}")
+            except Exception as e:
+                logger.error(f"Error clearing connection {key}: {e}")
+        
+        # Set all rules to inactive in database
+        try:
+            with app.app_context():
+                ForwardingRule.query.update({'is_active': False})
+                db.session.commit()
+                logger.info("Set all forwarding rules to inactive in database")
+        except Exception as e:
+            logger.error(f"Error updating database: {e}")
+            db.session.rollback()
+        
+        # Reset stop flag for future use
+        stop_all_flag.clear()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Emergency stop completed. Stopped {len(rule_ids)} forwarders and cleared {len(connection_keys)} connections.',
+            'stopped_rules': rule_ids,
+            'cleared_connections': connection_keys
+        })
+        
+    except Exception as e:
+        logger.error(f"Emergency stop error: {e}")
+        return jsonify({'error': f'Emergency stop failed: {str(e)}'}), 500
+
+# Status route
+@app.route('/api/status', methods=['GET'])
+def api_status():
+    """Get current status of all forwarders"""
+    try:
+        active_rule_ids = list(active_forwarders.keys())
+        status_info = []
+        
+        for rule_id in active_rule_ids:
+            try:
+                rule = ForwardingRule.query.get(rule_id)
+                forwarder_info = active_forwarders.get(rule_id, {})
+                
+                if rule:
+                    status_info.append({
+                        'rule_id': rule_id,
+                        'rule_name': rule.name,
+                        'is_active': rule.is_active,
+                        'started_at': forwarder_info.get('started_at', '').isoformat() if forwarder_info.get('started_at') else '',
+                        'source_chat_id': rule.source_chat_id,
+                        'destination_chat_id': rule.destination_chat_id,
+                        'thread_alive': forwarder_info.get('thread', {}).is_alive() if forwarder_info.get('thread') else False
+                    })
+            except Exception as e:
+                logger.error(f"Error getting status for rule {rule_id}: {e}")
+        
+        return jsonify({
+            'success': True,
+            'active_forwarders_count': len(active_rule_ids),
+            'stop_flag_set': stop_all_flag.is_set(),
+            'forwarders': status_info
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting status: {e}")
+        return jsonify({'error': str(e)}), 500
+
 # Test route
 @app.route('/api/test', methods=['GET'])
 def api_test():
@@ -496,7 +735,8 @@ def api_test():
             'message': 'API is working correctly',
             'timestamp': datetime.utcnow().isoformat(),
             'telegram_available': TELEGRAM_AVAILABLE,
-            'database_connected': True
+            'database_connected': True,
+            'active_forwarders': len(active_forwarders)
         })
     except Exception as e:
         logger.error(f"Test route error: {e}")
@@ -816,7 +1056,7 @@ def api_chat_histories():
 
 # Forwarding management functions
 def start_forwarding_rule(rule_id):
-    """Start a forwarding rule in a background thread with simple timer support"""
+    """Start a forwarding rule in a background thread with improved handling"""
     try:
         rule = ForwardingRule.query.get(rule_id)
         if not rule or not rule.is_active:
@@ -846,7 +1086,11 @@ def start_forwarding_rule(rule_id):
         # Start forwarding in background thread
         def run_forwarder():
             try:
-                asyncio.run(service.forward_messages_with_timer(
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                loop.run_until_complete(service.forward_messages_improved(
                     rule.source_chat_id,
                     rule.destination_chat_id,
                     keywords,
@@ -854,13 +1098,22 @@ def start_forwarding_rule(rule_id):
                     getattr(rule, 'use_timer', False),
                     getattr(rule, 'start_time', None),
                     getattr(rule, 'end_time', None),
-                    getattr(rule, 'timezone', 'America/New_York')
+                    getattr(rule, 'timezone', 'America/New_York'),
+                    rule_id
                 ))
             except Exception as e:
                 logger.error(f"Forwarding rule {rule_id} stopped with error: {e}")
-                # Remove from active forwarders
+            finally:
+                # Remove from active forwarders when thread ends
                 if rule_id in active_forwarders:
                     del active_forwarders[rule_id]
+                    logger.info(f"Cleaned up forwarding rule {rule_id}")
+                
+                # Disconnect service
+                try:
+                    asyncio.run(service.disconnect())
+                except:
+                    pass
         
         # Start thread
         thread = threading.Thread(target=run_forwarder, daemon=True)
@@ -885,30 +1138,56 @@ def start_forwarding_rule(rule_id):
         logger.error(f"Failed to start forwarding rule {rule_id}: {e}")
 
 def stop_forwarding_rule(rule_id):
-    """Stop a forwarding rule"""
+    """Stop a forwarding rule with proper cleanup"""
     try:
         if rule_id in active_forwarders:
             forwarder_info = active_forwarders[rule_id]
             
+            logger.info(f"Stopping forwarding rule {rule_id}")
+            
+            # Set the stop flag to signal the forwarder to stop
+            stop_all_flag.set()
+            time_module.sleep(1)  # Give it a moment to see the flag
+            stop_all_flag.clear()  # Reset for future use
+            
             # Try to disconnect the service
             try:
                 service = forwarder_info['service']
-                asyncio.run(service.disconnect())
+                
+                def disconnect_service():
+                    try:
+                        asyncio.run(service.disconnect())
+                    except Exception as e:
+                        logger.error(f"Error disconnecting service for rule {rule_id}: {e}")
+                
+                # Run disconnect in a separate thread with timeout
+                disconnect_thread = threading.Thread(target=disconnect_service, daemon=True)
+                disconnect_thread.start()
+                disconnect_thread.join(timeout=5)  # 5 second timeout
+                
             except Exception as e:
-                logger.error(f"Error disconnecting service for rule {rule_id}: {e}")
+                logger.error(f"Error handling service for rule {rule_id}: {e}")
             
             # Remove from active forwarders
             del active_forwarders[rule_id]
             logger.info(f"Stopped forwarding rule {rule_id}")
+        else:
+            logger.warning(f"Rule {rule_id} not found in active forwarders")
         
     except Exception as e:
         logger.error(f"Failed to stop forwarding rule {rule_id}: {e}")
 
 def stop_all_forwarding_rules():
     """Stop all active forwarding rules"""
+    logger.info("Stopping all forwarding rules")
+    stop_all_flag.set()  # Set global stop flag
+    
     rule_ids = list(active_forwarders.keys())
     for rule_id in rule_ids:
         stop_forwarding_rule(rule_id)
+    
+    # Clear the flag after stopping all
+    stop_all_flag.clear()
 
 # Start active rules on application startup
 def start_active_forwarding_rules():
